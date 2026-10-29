@@ -10,18 +10,31 @@ const {
 } = require('../../app/lib/cdp-launch')
 
 // A fake transport that drives createCdpClient: records sent frames and lets the
-// test push protocol messages back.
+// test push protocol messages back. It auto-answers the Target.* attach
+// handshake (setDiscoverTargets/getTargets/attachToTarget) so cdpClient() can
+// resolve; every other method is still driven manually via emitMessage.
 function fakeTransport () {
   const emitter = new EventEmitter()
-  return {
+  const t = {
     sent: [],
     closed: false,
+    auto: true,
     on: (ev, cb) => emitter.on(ev, cb),
     emitMessage: (obj) => emitter.emit('message', typeof obj === 'string' ? obj : JSON.stringify(obj)),
     emitClose: () => emitter.emit('close'),
-    send (str) { this.sent.push(JSON.parse(str)) },
-    close () { this.closed = true }
+    send (str) {
+      const msg = JSON.parse(str)
+      t.sent.push(msg)
+      if (!t.auto) return
+      const reply = (result) => queueMicrotask(() => t.emitMessage({ id: msg.id, result }))
+      if (msg.method === 'Target.setDiscoverTargets') reply({})
+      else if (msg.method === 'Target.getTargets') reply({ targetInfos: [{ targetId: 'T1', type: 'page' }] })
+      else if (msg.method === 'Target.createTarget') reply({ targetId: 'T1' })
+      else if (msg.method === 'Target.attachToTarget') reply({ sessionId: 'S1' })
+    },
+    close () { t.closed = true }
   }
+  return t
 }
 
 test('detectBrowserPath returns the first existing candidate', () => {
@@ -159,26 +172,71 @@ test('launcher throws BROWSER_NOT_FOUND when no executable is detected', async (
   )
 })
 
-test('cdpClient built from a launch handle round-trips send/on over its transport', async () => {
+test('cdpClient attaches to a page target and routes page-domain commands through its session', async () => {
   const f = launchFixture()
   const handle = await f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' })
   const client = await f.launch.cdpClient(handle)
+  // the attach handshake ran on the browser-level connection (no sessionId)
+  const handshake = f.transport.sent.filter(s => /^Target\./.test(s.method)).map(s => s.method)
+  assert.deepEqual(handshake, ['Target.setDiscoverTargets', 'Target.getTargets', 'Target.attachToTarget'])
+  assert.equal(f.transport.sent.find(s => s.method === 'Target.attachToTarget').params.flatten, true)
+  // page-domain commands now carry the attached session id at the top level
   const events = []
   client.on('Page.loadEventFired', () => events.push('load'))
   const promise = client.send('Page.enable')
-  const id = f.transport.sent.at(-1).id
-  f.transport.emitMessage({ id, result: {} })
+  const enable = f.transport.sent.at(-1)
+  assert.equal(enable.method, 'Page.enable')
+  assert.equal(enable.sessionId, 'S1')
+  f.transport.emitMessage({ id: enable.id, result: {} })
   await promise
-  f.transport.emitMessage({ method: 'Page.loadEventFired', params: {} })
+  // a session-scoped event is delivered to the facade listener
+  f.transport.emitMessage({ sessionId: 'S1', method: 'Page.loadEventFired', params: {} })
   assert.deepEqual(events, ['load'])
 })
 
-test('handle.close tears down the transport and kills the child', async () => {
+test('cdpClient creates a page target when the browser exposes none', async () => {
+  const f = launchFixture()
+  f.transport.auto = false
+  const handle = await f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' })
+  const pending = f.launch.cdpClient(handle)
+  // answer the handshake manually: no page target -> createTarget -> attach
+  const answer = (method, result) => {
+    const hit = [...f.transport.sent].reverse().find(s => s.method === method)
+    f.transport.emitMessage({ id: hit.id, result })
+  }
+  await new Promise(resolve => setImmediate(resolve)); answer('Target.setDiscoverTargets', {})
+  await new Promise(resolve => setImmediate(resolve)); answer('Target.getTargets', { targetInfos: [] })
+  await new Promise(resolve => setImmediate(resolve)); answer('Target.createTarget', { targetId: 'NEW' })
+  await new Promise(resolve => setImmediate(resolve)); answer('Target.attachToTarget', { sessionId: 'S9' })
+  await pending
+  assert.ok(f.transport.sent.some(s => s.method === 'Target.createTarget'))
+  assert.equal(f.transport.sent.find(s => s.method === 'Target.attachToTarget').params.targetId, 'NEW')
+})
+
+test('browser-level events with no sessionId still reach the page facade (titles)', async () => {
   const f = launchFixture()
   const handle = await f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' })
-  handle.close()
-  assert.equal(f.transport.closed, true)
+  const client = await f.launch.cdpClient(handle)
+  const titles = []
+  client.on('Target.targetInfoChanged', (p) => titles.push(p.targetInfo.title))
+  f.transport.emitMessage({ method: 'Target.targetInfoChanged', params: { targetInfo: { title: 'Hi' } } })
+  assert.deepEqual(titles, ['Hi'])
+})
+
+test('a re-open of the same browser reuses the live process (no second spawn)', async () => {
+  const f = launchFixture()
+  const h1 = await f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' })
+  const h2 = await f.launch.launcher({ id: 'b', url: 'https://y.com', browser: 'chrome' })
+  assert.equal(f.spawns.length, 1, 'only one browser process is spawned')
+  assert.equal(f.copies.length, 1, 'profile is copied once')
+  assert.equal(h2.child, h1.child, 'both handles share the live child')
+  // first close is reference-counted: the shared process stays up
+  h1.close()
+  assert.equal(f.spawns[0].killed, false)
+  // last close tears the shared process down
+  h2.close()
   assert.equal(f.spawns[0].killed, true)
+  assert.equal(f.transport.closed, true)
 })
 
 test('launcher continues when the profile copy fails (best-effort seed)', async () => {

@@ -92,9 +92,16 @@ function buildLaunchArgs ({ userDataDir, width, height, pipe = true, url, extraF
 }
 
 // Wrap a low-level transport ({ send(str), on('message'|'close', cb), close() })
-// as a CDP client: send(method, params) correlates a response by id, on(method)
-// subscribes to protocol events. This is engine-agnostic and fully testable
-// with a fake transport.
+// as a CDP client over a SINGLE message consumer (never register two handlers on
+// one transport). It is session-aware for CDP "flatten" mode:
+//   send(method, params, sessionId) routes a command to a target session when a
+//     sessionId is given (top-level field); browser-level calls omit it.
+//   on(method, cb, sessionId) binds a listener to a session.
+// An incoming event is delivered to a listener when it carries the listener's
+// sessionId OR no sessionId at all (browser-level events such as
+// Target.targetInfoChanged reach the single page facade too). Response
+// correlation is by global id and is unchanged. Engine-agnostic and fully
+// testable with a fake transport.
 function createCdpClient (transport) {
   let nextId = 1
   const pending = new Map()
@@ -115,7 +122,11 @@ function createCdpClient (transport) {
     }
     if (typeof msg.method === 'string') {
       const cbs = listeners.get(msg.method)
-      if (cbs) for (const cb of cbs) cb(msg.params || {})
+      if (cbs) {
+        for (const { cb, sessionId } of cbs) {
+          if (msg.sessionId === sessionId || msg.sessionId === undefined) cb(msg.params || {})
+        }
+      }
     }
   })
   transport.on('close', () => {
@@ -123,21 +134,23 @@ function createCdpClient (transport) {
     pending.clear()
   })
   return {
-    send (method, params) {
+    send (method, params, sessionId) {
       const id = nextId++
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject })
         try {
-          transport.send(JSON.stringify({ id, method, params: params || {} }))
+          const message = { id, method, params: params || {} }
+          if (sessionId !== undefined) message.sessionId = sessionId
+          transport.send(JSON.stringify(message))
         } catch (error) {
           pending.delete(id)
           reject(error)
         }
       })
     },
-    on (method, cb) {
+    on (method, cb, sessionId) {
       if (!listeners.has(method)) listeners.set(method, [])
-      listeners.get(method).push(cb)
+      listeners.get(method).push({ cb, sessionId })
     },
     close () { try { transport.close() } catch {} }
   }
@@ -211,11 +224,45 @@ function createCdpLaunch ({
   if (typeof spawn !== 'function') throw new TypeError('cdp-launch requires a spawn fn')
   if (typeof resolveUserDataDir !== 'function') throw new TypeError('cdp-launch requires resolveUserDataDir')
 
+  // One managed browser process per browser type, reference-counted. Reusing a
+  // live instance on re-open/refresh avoids spawning a second process that the
+  // Chromium user-data-dir singleton bounces into a stray visible window; the
+  // real teardown only runs when the last session for that browser closes.
+  const shared = new Map()
+
+  function makeHandle (id, key, slot) {
+    return {
+      id,
+      browser: key,
+      exePath: slot.exePath,
+      userDataDir: slot.userDataDir,
+      child: slot.child,
+      transport: slot.transport,
+      client: slot.client,
+      mode: slot.mode,
+      close () {
+        if (slot.refs > 0) slot.refs--
+        if (slot.refs > 0) return
+        slot.alive = false
+        if (shared.get(key) === slot) shared.delete(key)
+        try { if (slot.client && slot.client.close) slot.client.close() } catch {}
+        try { if (slot.transport && slot.transport.close) slot.transport.close() } catch {}
+        try { if (slot.child && slot.child.kill) slot.child.kill() } catch {}
+      }
+    }
+  }
+
   async function launcher ({ id, url, width, height, browser = 'chrome' } = {}) {
+    const key = normalizeBrowser(browser)
     const exePath = detectPath(browser, { env, fsExists })
-    if (!exePath) throw codedError('BROWSER_NOT_FOUND', `No ${normalizeBrowser(browser)} installation was found`)
+    if (!exePath) throw codedError('BROWSER_NOT_FOUND', `No ${key} installation was found`)
+    const live = shared.get(key)
+    if (live && live.alive) {
+      live.refs++
+      return makeHandle(id, key, live)
+    }
     if (typeof isBrowserRunning === 'function' && await isBrowserRunning(browser)) {
-      throw codedError('BROWSER_ALREADY_RUNNING', `Close your running ${normalizeBrowser(browser)} window and try again`)
+      throw codedError('BROWSER_ALREADY_RUNNING', `Close your running ${key} window and try again`)
     }
     const userDataDir = resolveUserDataDir(browser, { env })
     if (typeof copyProfile === 'function') {
@@ -251,24 +298,55 @@ function createCdpLaunch ({
       transport = await connectPort(endpoint)
       mode = 'port'
     }
-    return {
-      id,
-      browser: normalizeBrowser(browser),
+    const slot = {
+      key,
       exePath,
       userDataDir,
       child,
       transport,
+      // Create the CDP client ONCE per transport so a single message handler is
+      // registered even when several sessions share the browser.
+      client: createCdpClient(transport),
       mode,
-      close () {
-        try { if (transport && transport.close) transport.close() } catch {}
-        try { if (child && child.kill) child.kill() } catch {}
-      }
+      refs: 1,
+      alive: true
     }
+    if (child && typeof child.once === 'function') {
+      child.once('exit', () => { slot.alive = false; if (shared.get(key) === slot) shared.delete(key) })
+    }
+    shared.set(key, slot)
+    return makeHandle(id, key, slot)
   }
 
+  // Attach to a page target and return a session-bound facade with the SAME
+  // { send, on, close } shape createCdpBrowser expects. Page/Input/Emulation/
+  // Network commands only resolve against a PAGE target session: on the raw
+  // browser-level endpoint they fail with "wasn't found". The launcher normally
+  // already opened a page target at the url (CLI arg), so we attach to it; if
+  // none exists we create one. Note: the CDP target `sessionId` lives at the
+  // message top level and is distinct from Page.screencastFrameAck's
+  // `params.sessionId` (the screencast id), which stays in params.
   async function cdpClient (handle) {
     if (!handle || !handle.transport) throw new Error('CDP launch handle has no transport')
-    return createCdpClient(handle.transport)
+    const client = handle.client || createCdpClient(handle.transport)
+    await client.send('Target.setDiscoverTargets', { discover: true })
+    const info = await client.send('Target.getTargets')
+    const targets = (info && Array.isArray(info.targetInfos)) ? info.targetInfos : []
+    const page = targets.find((t) => t && t.type === 'page')
+    let targetId = page && page.targetId
+    if (!targetId) {
+      const created = await client.send('Target.createTarget', { url: 'about:blank' })
+      targetId = created && created.targetId
+    }
+    const attached = await client.send('Target.attachToTarget', { targetId, flatten: true })
+    const sessionId = attached && attached.sessionId
+    return {
+      send: (method, params) => client.send(method, params, sessionId),
+      on: (method, cb) => client.on(method, cb, sessionId),
+      // Detach just this session; the shared transport/process is torn down by
+      // the handle's reference-counted close().
+      close: () => { if (sessionId !== undefined) client.send('Target.detachFromTarget', { sessionId }).catch(() => {}) }
+    }
   }
 
   return { launcher, cdpClient }
