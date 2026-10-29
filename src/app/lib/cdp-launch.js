@@ -31,7 +31,15 @@ const HARDENING_FLAGS = [
   '--no-default-browser-check',
   '--disable-background-networking',
   '--disable-sync',
-  '--disable-features=TranslateUI',
+  // CalculateNativeWinOcclusion must be disabled: on Windows, Chromium marks a
+  // window it believes is occluded as hidden and STOPS painting it, which stops
+  // Page.startScreencast from ever emitting a frame (screencastVisibilityChanged
+  // -> visible:false). The backgrounding flags keep the renderer painting even
+  // when the window is not focused. Without these the engine streams nothing.
+  '--disable-features=TranslateUI,CalculateNativeWinOcclusion',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-background-timer-throttling',
   '--disable-breakpad',
   '--disable-domain-reliability',
   '--disable-component-update'

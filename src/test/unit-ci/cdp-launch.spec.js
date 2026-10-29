@@ -66,6 +66,15 @@ test('buildLaunchArgs uses the pipe flag, user-data-dir, hardening and window si
   assert.equal(args.at(-1), 'https://x.com')
 })
 
+test('hardening disables native window occlusion so the screencast keeps painting', () => {
+  // Regression guard: without CalculateNativeWinOcclusion disabled Chromium on
+  // Windows stops painting an unfocused window and startScreencast emits no
+  // frames (proven live). These flags are load-bearing for streaming.
+  assert.ok(HARDENING_FLAGS.includes('--disable-features=TranslateUI,CalculateNativeWinOcclusion'))
+  assert.ok(HARDENING_FLAGS.includes('--disable-backgrounding-occluded-windows'))
+  assert.ok(HARDENING_FLAGS.includes('--disable-renderer-backgrounding'))
+})
+
 test('buildLaunchArgs switches to an ephemeral port when pipe is false', () => {
   const args = buildLaunchArgs({ userDataDir: 'C:\\m', pipe: false })
   assert.ok(args.includes('--remote-debugging-port=0'))
