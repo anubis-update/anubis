@@ -204,7 +204,8 @@ async function initAppServer () {
     initCdpBrowser(child)
     globalState.set('browserEngineRouter', require('./rbi-rpc-router').createRbiRpcRouter({
       getRbiBrowser: () => globalState.get('rbiBrowser'),
-      getCdpBrowser: () => globalState.get('cdpBrowser')
+      getCdpBrowser: () => globalState.get('cdpBrowser'),
+      isSystemRuntime: () => globalState.get('machineRuntimeRole') === 'system'
     }))
     globalState.set('serverInited', true)
   }

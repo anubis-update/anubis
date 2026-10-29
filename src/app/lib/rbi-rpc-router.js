@@ -28,10 +28,17 @@ function engineNameFor (engine) {
   return (engine === 'chrome' || engine === 'edge') ? 'cdp' : 'rbi'
 }
 
-function createRbiRpcRouter ({ getRbiBrowser, getCdpBrowser } = {}) {
+function codedError (code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+function createRbiRpcRouter ({ getRbiBrowser, getCdpBrowser, isSystemRuntime } = {}) {
   if (typeof getRbiBrowser !== 'function') {
     throw new TypeError('rbi rpc router requires getRbiBrowser')
   }
+  const inSystemRuntime = typeof isSystemRuntime === 'function' ? isSystemRuntime : () => false
   const owners = new Map()
 
   function resolveEngine (name) {
@@ -57,6 +64,15 @@ function createRbiRpcRouter ({ getRbiBrowser, getCdpBrowser } = {}) {
 
     if (func === 'rbiOpen') {
       const name = engineNameFor(arg.engine)
+      // Chrome/Edge must run in the logged-on user's context (session >= 1) so
+      // it reaches the real profile and shows a visible window. In the SYSTEM
+      // machine runtime (session 0) there is no user desktop or profile, so
+      // reject deterministically instead of launching an invisible, empty
+      // browser; the client maps this code to a "select your Windows workspace
+      // context" note.
+      if (name === 'cdp' && inSystemRuntime()) {
+        throw codedError('USER_CONTEXT_REQUIRED', 'Chrome/Edge needs your Windows workspace context. Open the context selector, choose your workspace, then try again.')
+      }
       if (id) owners.set(id, name)
       return resolveEngine(name)[method](arg)
     }

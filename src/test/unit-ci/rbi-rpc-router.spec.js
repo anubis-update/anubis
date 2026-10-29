@@ -129,3 +129,42 @@ test('an unknown function is rejected', () => {
   const { router } = fixture()
   assert.throws(() => router.dispatch('rbiBogus', [{ id: 'a' }]), /Unknown browser control function/)
 })
+
+test('chrome/edge open is rejected in the system runtime with USER_CONTEXT_REQUIRED', async () => {
+  const cdp = fakeEngine('cdp')
+  const rbi = fakeEngine('rbi')
+  const router = createRbiRpcRouter({
+    getRbiBrowser: () => rbi,
+    getCdpBrowser: () => cdp,
+    isSystemRuntime: () => true
+  })
+  for (const engine of ['chrome', 'edge']) {
+    await assert.rejects(
+      Promise.resolve().then(() => router.dispatch('rbiOpen', [{ id: 'a', url: 'https://a.com', engine }])),
+      (error) => error.code === 'USER_CONTEXT_REQUIRED'
+    )
+  }
+  assert.equal(cdp.calls.length, 0, 'the CDP engine is never reached in the system runtime')
+})
+
+test('the internal RBI engine still works in the system runtime', async () => {
+  const rbi = fakeEngine('rbi')
+  const router = createRbiRpcRouter({
+    getRbiBrowser: () => rbi,
+    getCdpBrowser: () => fakeEngine('cdp'),
+    isSystemRuntime: () => true
+  })
+  await router.dispatch('rbiOpen', [{ id: 'a', url: 'https://a.com' }])
+  assert.equal(rbi.calls.at(-1).method, 'open')
+})
+
+test('chrome/edge open is allowed when not in the system runtime', async () => {
+  const cdp = fakeEngine('cdp')
+  const router = createRbiRpcRouter({
+    getRbiBrowser: () => fakeEngine('rbi'),
+    getCdpBrowser: () => cdp,
+    isSystemRuntime: () => false
+  })
+  await router.dispatch('rbiOpen', [{ id: 'a', url: 'https://a.com', engine: 'chrome' }])
+  assert.equal(cdp.calls.at(-1).method, 'open')
+})
