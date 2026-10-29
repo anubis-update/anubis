@@ -5,6 +5,8 @@ import BrowserPanel from './browser-panel'
 import { notification } from '../common/notification'
 import { handleErr } from '../../common/fetch'
 import { buildProfile, sanitizeFileBase } from './browser-profile'
+import { isCdpEngine } from './engine-options'
+import { CONTEXT_ROUTE, intentKey, decideContextAction, noteFor } from './web-context'
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 
 function downloadJson (obj, fileName) {
@@ -32,6 +34,7 @@ export default function WebSession ({ tab, reloadTab }) {
   const pendingRef = useRef(null)
   const [activeUa, setActiveUa] = useState('')
   const [engine, setEngine] = useState('rbi')
+  const [contextNote, setContextNote] = useState('')
   let valid = false
   try {
     valid = ['http:', 'https:'].includes(new URL(url).protocol)
@@ -194,6 +197,62 @@ export default function WebSession ({ tab, reloadTab }) {
     notification.success({ message: 'Profile loaded', description: `${bundle.name} (${list.length} cookies)` })
   }, [])
 
+  // Re-apply the engine a context switch reloaded for. Selecting Chrome/Edge
+  // auto-selects the user's Windows workspace context and reloads (see
+  // onChangeEngine); the chosen engine is stashed per tab so the reloaded tab
+  // re-opens with it instead of silently reverting to RBI.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(intentKey(tab.id))
+      if (isCdpEngine(saved)) setEngine(saved)
+    } catch (e) {}
+  }, [tab.id])
+
+  // Chrome/Edge only stream from the logged-on user's Windows workspace context
+  // (session >= 1); the default SYSTEM runtime has no user profile or desktop.
+  // When the operator picks Chrome/Edge we auto-select the single signed-in user
+  // context through the shipped /_anubis/contexts endpoint (the gateway then
+  // persists that selector across the reload), so no manual context pick is
+  // needed. RBI needs no context and is applied immediately.
+  const onChangeEngine = useCallback(async (next) => {
+    setContextNote('')
+    if (!isCdpEngine(next)) {
+      try { window.localStorage.removeItem(intentKey(tab.id)) } catch (e) {}
+      setEngine(next)
+      return
+    }
+    let decision = { action: 'error' }
+    try {
+      const res = await window.fetch(CONTEXT_ROUTE, { credentials: 'same-origin', cache: 'no-store' })
+      decision = res.ok ? decideContextAction(await res.json()) : { action: 'unsupported' }
+    } catch (e) {
+      decision = { action: 'error' }
+    }
+    if (decision.action === 'select') {
+      try {
+        window.localStorage.setItem(intentKey(tab.id), next)
+        const res = await window.fetch(CONTEXT_ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: decision.id })
+        })
+        if (!res.ok) throw new Error('context select failed')
+        window.localStorage.removeItem('tokenElecterm')
+        window.location.reload()
+        return
+      } catch (e) {
+        try { window.localStorage.removeItem(intentKey(tab.id)) } catch (err) {}
+        setContextNote(noteFor('error'))
+        return
+      }
+    }
+    // Could not auto-route: keep RBI working and explain in neutral English.
+    setEngine('rbi')
+    setContextNote(noteFor(decision.action))
+  }, [tab.id])
+
   function renderView () {
     if (!valid) return <div>URL: <b>{url}</b> not valid (HTTP or HTTPS required)</div>
     if (!embedded) {
@@ -245,7 +304,8 @@ export default function WebSession ({ tab, reloadTab }) {
           activeUa={activeUa}
           engine={engine}
           entitled
-          onChangeEngine={setEngine}
+          contextNote={contextNote}
+          onChangeEngine={onChangeEngine}
           onApplyUa={onApplyUa}
           onExportCookies={onExportCookies}
           onImportCookies={onImportCookies}

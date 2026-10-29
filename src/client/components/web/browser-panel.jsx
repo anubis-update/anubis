@@ -43,6 +43,7 @@ export default function BrowserPanel ({
   activeUa,
   engine = 'rbi',
   entitled = true,
+  contextNote = '',
   onChangeEngine,
   onApplyUa,
   onExportCookies,
@@ -206,6 +207,9 @@ export default function BrowserPanel ({
           options={buildEngineOptions({ entitled })}
         />
         <div><Text type='secondary'>{PROFILE_NOTE}</Text></div>
+        {contextNote && (
+          <div className='mg1t'><Text type='warning'>{contextNote}</Text></div>
+        )}
       </div>
 
       <div>
