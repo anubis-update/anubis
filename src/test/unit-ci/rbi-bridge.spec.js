@@ -57,6 +57,13 @@ test('control methods name server-side rbi* functions with the session id', () =
   assert.deepEqual(calls[4].args, [{ id: 'a' }])
 })
 
+test('open forwards the engine field through to the rbiOpen args', () => {
+  const calls = []
+  const bridge = createRbiBridge({ rpc: (func, args) => { calls.push({ func, args }); return Promise.resolve() } })
+  bridge.open('a', { url: 'https://x', width: 10, height: 20, engine: 'chrome' })
+  assert.deepEqual(calls[0].args, [{ id: 'a', url: 'https://x', width: 10, height: 20, engine: 'chrome' }])
+})
+
 test('cookie bridge methods name the server-side rbi cookie functions', () => {
   const calls = []
   const bridge = createRbiBridge({ rpc: (func, args) => { calls.push({ func, args }); return Promise.resolve() } })

@@ -153,7 +153,7 @@ const initWs = function (app, { rbiBridge } = {}) {
         }
         try {
           if (msg.t === 'open') {
-            await rbiBridge.open(id, { url: msg.url, width: msg.width, height: msg.height, dpr: msg.dpr, userAgent: msg.userAgent })
+            await rbiBridge.open(id, { url: msg.url, width: msg.width, height: msg.height, dpr: msg.dpr, userAgent: msg.userAgent, engine: msg.engine })
           } else if (msg.t === 'mouse' || msg.t === 'key') {
             await rbiBridge.input(id, msg)
           } else if (msg.t === 'resize') {
