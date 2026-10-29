@@ -31,6 +31,8 @@ function fakeTransport () {
       else if (msg.method === 'Target.getTargets') reply({ targetInfos: [{ targetId: 'T1', type: 'page' }] })
       else if (msg.method === 'Target.createTarget') reply({ targetId: 'T1' })
       else if (msg.method === 'Target.attachToTarget') reply({ sessionId: 'S1' })
+      else if (msg.method === 'Target.activateTarget') reply({})
+      else if (msg.method === 'Page.bringToFront') reply({})
     },
     close () { t.closed = true }
   }
@@ -178,7 +180,7 @@ test('cdpClient attaches to a page target and routes page-domain commands throug
   const client = await f.launch.cdpClient(handle)
   // the attach handshake ran on the browser-level connection (no sessionId)
   const handshake = f.transport.sent.filter(s => /^Target\./.test(s.method)).map(s => s.method)
-  assert.deepEqual(handshake, ['Target.setDiscoverTargets', 'Target.getTargets', 'Target.attachToTarget'])
+  assert.deepEqual(handshake, ['Target.setDiscoverTargets', 'Target.getTargets', 'Target.attachToTarget', 'Target.activateTarget'])
   assert.equal(f.transport.sent.find(s => s.method === 'Target.attachToTarget').params.flatten, true)
   // page-domain commands now carry the attached session id at the top level
   const events = []
@@ -208,6 +210,8 @@ test('cdpClient creates a page target when the browser exposes none', async () =
   await new Promise(resolve => setImmediate(resolve)); answer('Target.getTargets', { targetInfos: [] })
   await new Promise(resolve => setImmediate(resolve)); answer('Target.createTarget', { targetId: 'NEW' })
   await new Promise(resolve => setImmediate(resolve)); answer('Target.attachToTarget', { sessionId: 'S9' })
+  await new Promise(resolve => setImmediate(resolve)); answer('Target.activateTarget', {})
+  await new Promise(resolve => setImmediate(resolve)); answer('Page.bringToFront', {})
   await pending
   assert.ok(f.transport.sent.some(s => s.method === 'Target.createTarget'))
   assert.equal(f.transport.sent.find(s => s.method === 'Target.attachToTarget').params.targetId, 'NEW')
@@ -237,6 +241,51 @@ test('a re-open of the same browser reuses the live process (no second spawn)', 
   h2.close()
   assert.equal(f.spawns[0].killed, true)
   assert.equal(f.transport.closed, true)
+})
+
+test('a reused handle opens its own page target (new tab) instead of sharing one', async () => {
+  const f = launchFixture()
+  await f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' })
+  const h2 = await f.launch.launcher({ id: 'b', url: 'https://y.com', browser: 'chrome' })
+  assert.equal(h2.reused, true)
+  f.transport.sent.length = 0
+  await f.launch.cdpClient(h2)
+  const methods = f.transport.sent.map(s => s.method)
+  assert.ok(methods.includes('Target.createTarget'), 'reused session creates its own page target')
+  assert.ok(!methods.includes('Target.getTargets'), 'reused session does not reuse the existing page')
+})
+
+test('startScreencast retries after "Not attached to an active page"', async () => {
+  const f = launchFixture()
+  f.transport.auto = false
+  const handle = await f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' })
+  const pending = f.launch.cdpClient(handle)
+  const answer = (method, result) => {
+    const hit = [...f.transport.sent].reverse().find(s => s.method === method && !s._answered)
+    hit._answered = true
+    f.transport.emitMessage({ id: hit.id, result })
+  }
+  const err = (method, message) => {
+    const hit = [...f.transport.sent].reverse().find(s => s.method === method && !s._answered)
+    hit._answered = true
+    f.transport.emitMessage({ id: hit.id, error: { message } })
+  }
+  const tick = () => new Promise(resolve => setImmediate(resolve))
+  await tick(); answer('Target.setDiscoverTargets', {})
+  await tick(); answer('Target.getTargets', { targetInfos: [{ targetId: 'T1', type: 'page' }] })
+  await tick(); answer('Target.attachToTarget', { sessionId: 'S1' })
+  await tick(); answer('Target.activateTarget', {})
+  await tick(); answer('Page.bringToFront', {})
+  const client = await pending
+  const started = client.send('Page.startScreencast', { format: 'jpeg' })
+  await tick(); err('Page.startScreencast', 'Not attached to an active page')
+  await tick(); answer('Target.activateTarget', {})
+  await tick(); answer('Page.bringToFront', {})
+  await new Promise(resolve => setTimeout(resolve, 200))
+  await tick(); answer('Page.startScreencast', { ok: true })
+  assert.deepEqual(await started, { ok: true })
+  const starts = f.transport.sent.filter(s => s.method === 'Page.startScreencast')
+  assert.equal(starts.length, 2, 'startScreencast was retried once')
 })
 
 test('launcher continues when the profile copy fails (best-effort seed)', async () => {

@@ -230,10 +230,11 @@ function createCdpLaunch ({
   // real teardown only runs when the last session for that browser closes.
   const shared = new Map()
 
-  function makeHandle (id, key, slot) {
+  function makeHandle (id, key, slot, reused) {
     return {
       id,
       browser: key,
+      reused: !!reused,
       exePath: slot.exePath,
       userDataDir: slot.userDataDir,
       child: slot.child,
@@ -259,7 +260,7 @@ function createCdpLaunch ({
     const live = shared.get(key)
     if (live && live.alive) {
       live.refs++
-      return makeHandle(id, key, live)
+      return makeHandle(id, key, live, true)
     }
     if (typeof isBrowserRunning === 'function' && await isBrowserRunning(browser)) {
       throw codedError('BROWSER_ALREADY_RUNNING', `Close your running ${key} window and try again`)
@@ -315,7 +316,7 @@ function createCdpLaunch ({
       child.once('exit', () => { slot.alive = false; if (shared.get(key) === slot) shared.delete(key) })
     }
     shared.set(key, slot)
-    return makeHandle(id, key, slot)
+    return makeHandle(id, key, slot, false)
   }
 
   // Attach to a page target and return a session-bound facade with the SAME
@@ -330,18 +331,54 @@ function createCdpLaunch ({
     if (!handle || !handle.transport) throw new Error('CDP launch handle has no transport')
     const client = handle.client || createCdpClient(handle.transport)
     await client.send('Target.setDiscoverTargets', { discover: true })
-    const info = await client.send('Target.getTargets')
-    const targets = (info && Array.isArray(info.targetInfos)) ? info.targetInfos : []
-    const page = targets.find((t) => t && t.type === 'page')
-    let targetId = page && page.targetId
-    if (!targetId) {
+    let targetId
+    if (handle.reused) {
+      // The browser is already alive (re-open/refresh). Give this session its
+      // own page target (a new tab in the same window/process) so its screencast
+      // is independent of any other session's page.
       const created = await client.send('Target.createTarget', { url: 'about:blank' })
       targetId = created && created.targetId
+    } else {
+      const info = await client.send('Target.getTargets')
+      const targets = (info && Array.isArray(info.targetInfos)) ? info.targetInfos : []
+      const page = targets.find((t) => t && t.type === 'page')
+      targetId = page && page.targetId
+      if (!targetId) {
+        const created = await client.send('Target.createTarget', { url: 'about:blank' })
+        targetId = created && created.targetId
+      }
     }
     const attached = await client.send('Target.attachToTarget', { targetId, flatten: true })
     const sessionId = attached && attached.sessionId
+    // Raise the page to the foreground so Page.startScreencast does not fail with
+    // "Not attached to an active page" when the just-launched window is not yet
+    // the focused/active target. Target.activateTarget (browser-level) is the
+    // reliable activation; Page.bringToFront backs it up.
+    const activate = async () => {
+      if (targetId !== undefined) await client.send('Target.activateTarget', { targetId }).catch(() => {})
+      await client.send('Page.bringToFront', {}, sessionId).catch(() => {})
+    }
+    await activate()
+    const rawSend = (method, params) => client.send(method, params, sessionId)
     return {
-      send: (method, params) => client.send(method, params, sessionId),
+      // Page.startScreencast can still intermittently report the page as not
+      // active right after launch; re-activate and retry a few times so the
+      // stream reliably starts. The engine (cdp-browser.js) stays unchanged.
+      send: async (method, params) => {
+        if (method !== 'Page.startScreencast') return rawSend(method, params)
+        let lastError
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            return await rawSend(method, params)
+          } catch (error) {
+            lastError = error
+            if (!/not attached to an active page/i.test(error && error.message)) throw error
+            await activate()
+            await new Promise((resolve) => setTimeout(resolve, 150))
+          }
+        }
+        throw lastError
+      },
       on: (method, cb) => client.on(method, cb, sessionId),
       // Detach just this session; the shared transport/process is torn down by
       // the handle's reference-counted close().
