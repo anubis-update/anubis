@@ -401,3 +401,17 @@ test('poolSize is exposed as 0 for interface parity', async () => {
   const f = fixture()
   assert.equal(f.cdp.poolSize(), 0)
 })
+
+test('open passes browser=chrome to the launcher by default and for engine chrome', async () => {
+  const f = fixture()
+  await f.cdp.open({ id: 'a', url: 'https://example.org' })
+  await f.cdp.open({ id: 'b', url: 'https://example.org', engine: 'chrome' })
+  assert.equal(f.launches[0].opts.browser, 'chrome')
+  assert.equal(f.launches[1].opts.browser, 'chrome')
+})
+
+test('open passes browser=edge to the launcher for engine edge', async () => {
+  const f = fixture()
+  await f.cdp.open({ id: 'a', url: 'https://example.org', engine: 'edge' })
+  assert.equal(f.launches[0].opts.browser, 'edge')
+})

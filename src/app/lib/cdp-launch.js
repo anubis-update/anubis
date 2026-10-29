@@ -194,6 +194,47 @@ function createWsTransport (ws) {
   }
 }
 
+// Bulky, regenerable sub-directories not worth copying from the real profile:
+// skipping them keeps the managed copy small/fast while preserving the parts
+// that carry identity (cookies, logins, preferences, Local State key).
+const PROFILE_SKIP_DIRS = new Set([
+  'Cache', 'Code Cache', 'GPUCache', 'ShaderCache', 'GrShaderCache', 'DawnCache',
+  'DawnGraphiteCache', 'DawnWebGPUCache', 'Service Worker', 'Crashpad',
+  'Safe Browsing', 'BrowserMetrics', 'component_crx_cache', 'extensions_crx_cache',
+  'optimization_guide_model_store', 'segmentation_platform', 'GraphiteDawnCache'
+])
+
+// Per-process singleton/lock artifacts that are held open by the running browser
+// and must not be copied (copying them would both fail and confuse the clone).
+const PROFILE_SKIP_FILES = /^(lockfile|Singleton(Lock|Cookie|Socket)|\.lock)$/i
+
+// Copy a browser profile tree file-by-file, tolerating the per-file EBUSY/EPERM
+// errors that occur when the user's browser is still running (strategy A clones
+// a live profile). A single fs.cp would abort the whole copy on the first locked
+// file, leaving an empty throwaway profile; this skips locked files and bulky
+// caches and keeps going so cookies/logins survive. Concrete (Node fs only), not
+// exercised by the launcher unit tests, but unit-tested directly.
+async function copyProfileTolerant (src, dst) {
+  let entries
+  try {
+    entries = await fs.promises.readdir(src, { withFileTypes: true })
+  } catch {
+    return
+  }
+  await fs.promises.mkdir(dst, { recursive: true }).catch(() => {})
+  for (const entry of entries) {
+    const from = path.join(src, entry.name)
+    const to = path.join(dst, entry.name)
+    if (entry.isDirectory()) {
+      if (PROFILE_SKIP_DIRS.has(entry.name)) continue
+      await copyProfileTolerant(from, to)
+    } else if (entry.isFile()) {
+      if (PROFILE_SKIP_FILES.test(entry.name)) continue
+      try { await fs.promises.copyFile(from, to) } catch {}
+    }
+  }
+}
+
 // Read the ephemeral debugging port Chromium writes to DevToolsActivePort in the
 // user-data-dir after a `--remote-debugging-port=0` launch.
 function readDevToolsPort (userDataDir, { fsReadFile } = {}) {
@@ -405,5 +446,6 @@ module.exports = {
   readDevToolsPort,
   createPipeTransport,
   createWsTransport,
+  copyProfileTolerant,
   HARDENING_FLAGS
 }

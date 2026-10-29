@@ -165,7 +165,7 @@ function createCdpBrowser ({
     })
   }
 
-  async function open ({ id, url, width, height, dpr, userAgent } = {}) {
+  async function open ({ id, url, width, height, dpr, userAgent, engine } = {}) {
     if (typeof id !== 'string' || !id) throw new Error('Invalid browser session id')
     const existing = sessions.get(id)
     if (existing) {
@@ -179,7 +179,10 @@ function createCdpBrowser ({
     if (sessions.size >= maxSessions) throw new Error('Too many browser sessions')
     const w = clampDimension(width, 1280)
     const h = clampDimension(height, 720)
-    const handle = await launcher({ id, url, width: w, height: h })
+    // 'edge' launches Microsoft Edge; anything else (incl. 'chrome') launches
+    // Chrome. The launcher only knows which browser to spawn from this field.
+    const browser = engine === 'edge' ? 'edge' : 'chrome'
+    const handle = await launcher({ id, url, width: w, height: h, browser })
     let entry
     try {
       const client = await cdpClient(handle)

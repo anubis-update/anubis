@@ -247,7 +247,7 @@ function initRbiBrowser (child) {
 // wired here; this constructs the engine with the injectable launcher/client so
 // the routing slice is complete and testable.
 function initCdpBrowser (child) {
-  const { createCdpLaunch, createPipeTransport, createWsTransport, readDevToolsPort } = require('./cdp-launch')
+  const { createCdpLaunch, createPipeTransport, createWsTransport, readDevToolsPort, copyProfileTolerant } = require('./cdp-launch')
   const chromeMajor = String(process.versions.chrome || '').split('.')[0] || '131'
   const defaultUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`
   const { spawn } = require('node:child_process')
@@ -256,7 +256,7 @@ function initCdpBrowser (child) {
   const { launcher, cdpClient } = createCdpLaunch({
     spawn,
     fsExists: (p) => nodeFs.existsSync(p),
-    copyProfile: (src, dst) => nodeFs.promises.cp(src, dst, { recursive: true, force: true, errorOnExist: false }),
+    copyProfile: (src, dst) => copyProfileTolerant(src, dst),
     resolveUserDataDir: (browser) => nodePath.join(app.getPath('userData'), 'cdp-profiles', browser),
     connectPipe: async (proc) => createPipeTransport(proc),
     connectPort: async (endpoint) => {

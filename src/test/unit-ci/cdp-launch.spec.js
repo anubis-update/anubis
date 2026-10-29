@@ -6,6 +6,7 @@ const {
   createCdpClient,
   detectBrowserPath,
   buildLaunchArgs,
+  copyProfileTolerant,
   HARDENING_FLAGS
 } = require('../../app/lib/cdp-launch')
 
@@ -303,4 +304,36 @@ test('launcher fails fast with PROFILE_SOURCE_MISSING when the source profile is
   )
   assert.equal(f.spawns.length, 0, 'no browser is spawned when the source profile is missing')
   assert.equal(f.copies.length, 0, 'no copy is attempted when the source profile is missing')
+})
+
+test('copyProfileTolerant clones identity files, skips cache dirs and lock files', async () => {
+  const fs = require('node:fs')
+  const os = require('node:os')
+  const path = require('node:path')
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cdp-copy-'))
+  const src = path.join(base, 'src')
+  const dst = path.join(base, 'dst')
+  fs.mkdirSync(path.join(src, 'Default', 'Network'), { recursive: true })
+  fs.mkdirSync(path.join(src, 'Default', 'Cache'), { recursive: true })
+  fs.mkdirSync(path.join(src, 'Default', 'Service Worker'), { recursive: true })
+  fs.writeFileSync(path.join(src, 'Local State'), 'key')
+  fs.writeFileSync(path.join(src, 'lockfile'), 'x')
+  fs.writeFileSync(path.join(src, 'Default', 'Cookies'), 'c')
+  fs.writeFileSync(path.join(src, 'Default', 'Network', 'Cookies'), 'c')
+  fs.writeFileSync(path.join(src, 'Default', 'Cache', 'data_0'), 'big')
+  fs.writeFileSync(path.join(src, 'Default', 'Service Worker', 'sw'), 'big')
+
+  await copyProfileTolerant(src, dst)
+
+  assert.ok(fs.existsSync(path.join(dst, 'Local State')), 'Local State copied')
+  assert.ok(fs.existsSync(path.join(dst, 'Default', 'Cookies')), 'cookies copied')
+  assert.ok(fs.existsSync(path.join(dst, 'Default', 'Network', 'Cookies')), 'network cookies copied')
+  assert.ok(!fs.existsSync(path.join(dst, 'lockfile')), 'lock file skipped')
+  assert.ok(!fs.existsSync(path.join(dst, 'Default', 'Cache')), 'cache dir skipped')
+  assert.ok(!fs.existsSync(path.join(dst, 'Default', 'Service Worker')), 'service worker dir skipped')
+  fs.rmSync(base, { recursive: true, force: true })
+})
+
+test('copyProfileTolerant does not throw when the source profile is absent', async () => {
+  await copyProfileTolerant('C:\\no\\such\\profile\\here', 'C:\\no\\such\\dest\\here')
 })
