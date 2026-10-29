@@ -94,6 +94,14 @@ function getAdminPolicy (env = process.env) {
     autoStartOnLogin: envBool(env.ANUBIS_ADMIN_AUTOSTART, true)
   }
   const locked = Object.keys(values)
+  // AI provider endpoint is user-configurable by default (multi-provider).
+  // Admins can re-lock it for managed deployments via ANUBIS_ADMIN_AI_LOCK.
+  if (!envBool(env.ANUBIS_ADMIN_AI_LOCK, false)) {
+    for (const k of ['baseURLAI', 'apiPathAI', 'authHeaderNameAI']) {
+      const i = locked.indexOf(k)
+      if (i >= 0) locked.splice(i, 1)
+    }
+  }
   const customSyncApi = envStr(env.ANUBIS_ADMIN_CUSTOM_SYNC_API, '')
   const customSyncSecret = envStr(env.ANUBIS_ADMIN_CUSTOM_SYNC_SECRET, '')
   const customSyncUser = envStr(env.ANUBIS_ADMIN_CUSTOM_SYNC_USER, '')
