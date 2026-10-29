@@ -31,6 +31,7 @@ export default function WebSession ({ tab, reloadTab }) {
   const rbiRef = useRef(null)
   const pendingRef = useRef(null)
   const [activeUa, setActiveUa] = useState('')
+  const [engine, setEngine] = useState('rbi')
   let valid = false
   try {
     valid = ['http:', 'https:'].includes(new URL(url).protocol)
@@ -203,6 +204,7 @@ export default function WebSession ({ tab, reloadTab }) {
           tab={tab}
           url={url}
           userAgent={activeUa}
+          engine={engine}
           onNavigate={setCurrentUrl}
           onError={setLoadError}
           onCookies={handleCookies}
@@ -241,6 +243,9 @@ export default function WebSession ({ tab, reloadTab }) {
       {!embedded && valid && (
         <BrowserPanel
           activeUa={activeUa}
+          engine={engine}
+          entitled
+          onChangeEngine={setEngine}
           onApplyUa={onApplyUa}
           onExportCookies={onExportCookies}
           onImportCookies={onImportCookies}

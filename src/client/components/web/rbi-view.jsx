@@ -9,7 +9,7 @@ import React, { useRef, useEffect, forwardRef, useImperativeHandle } from 'react
 // The parent drives extra realism controls (custom user agent, cookie
 // import/export) through an imperative `send(obj)` handle exposed via ref, plus
 // an `onCookies` callback for exported cookie payloads pushed back from main.
-export default forwardRef(function RbiView ({ tab, url, userAgent, onNavigate, onError, onCookies }, ref) {
+export default forwardRef(function RbiView ({ tab, url, userAgent, engine, onNavigate, onError, onCookies }, ref) {
   const canvasRef = useRef(null)
   const wsRef = useRef(null)
 
@@ -65,7 +65,8 @@ export default forwardRef(function RbiView ({ tab, url, userAgent, onNavigate, o
     }
 
     const ua = typeof userAgent === 'string' && userAgent.trim() ? userAgent.trim() : undefined
-    ws.onopen = () => send({ t: 'open', url, width: size.width, height: size.height, dpr: 1, userAgent: ua })
+    const eng = engine === 'chrome' || engine === 'edge' ? engine : undefined
+    ws.onopen = () => send({ t: 'open', url, width: size.width, height: size.height, dpr: 1, userAgent: ua, engine: eng })
     ws.onmessage = async (ev) => {
       if (typeof ev.data === 'string') {
         let msg
@@ -137,7 +138,7 @@ export default forwardRef(function RbiView ({ tab, url, userAgent, onNavigate, o
       try { ws.close() } catch {}
       wsRef.current = null
     }
-  }, [tab.id, url, userAgent])
+  }, [tab.id, url, userAgent, engine])
 
   return (
     <div style={{ width: '100%', height: '100%', background: '#fff', overflow: 'hidden' }}>

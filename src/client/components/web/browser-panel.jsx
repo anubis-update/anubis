@@ -9,6 +9,7 @@ import {
   parseVault,
   mergeVault
 } from './browser-profile'
+import { buildEngineOptions, PROFILE_NOTE } from './engine-options'
 
 const { Title, Text } = Typography
 const VAULT_KEY = 'anubisBrowserVault'
@@ -40,6 +41,9 @@ function downloadJson (obj, fileName) {
 // callbacks supplied by WebSession (which owns the RBI socket).
 export default function BrowserPanel ({
   activeUa,
+  engine = 'rbi',
+  entitled = true,
+  onChangeEngine,
   onApplyUa,
   onExportCookies,
   onImportCookies,
@@ -197,14 +201,11 @@ export default function BrowserPanel ({
         <Title level={5}>Browser engine</Title>
         <Select
           style={{ width: 240 }}
-          value='rbi'
-          options={[
-            { value: 'rbi', label: 'Internal (RBI)' },
-            { value: 'chrome', label: 'Google Chrome', disabled: true },
-            { value: 'edge', label: 'Microsoft Edge', disabled: true }
-          ]}
+          value={engine}
+          onChange={onChangeEngine}
+          options={buildEngineOptions({ entitled })}
         />
-        <div><Text type='secondary'>Chrome/Edge control coming in the next phase.</Text></div>
+        <div><Text type='secondary'>{PROFILE_NOTE}</Text></div>
       </div>
 
       <div>
