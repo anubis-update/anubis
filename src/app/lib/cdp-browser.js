@@ -180,37 +180,52 @@ function createCdpBrowser ({
     const w = clampDimension(width, 1280)
     const h = clampDimension(height, 720)
     const handle = await launcher({ id, url, width: w, height: h })
-    const client = await cdpClient(handle)
-    const entry = {
-      id,
-      handle,
-      client,
-      width: w,
-      height: h,
-      dpr: Number(dpr) > 0 ? Number(dpr) : 1,
-      url,
-      closed: false
+    let entry
+    try {
+      const client = await cdpClient(handle)
+      entry = {
+        id,
+        handle,
+        client,
+        width: w,
+        height: h,
+        dpr: Number(dpr) > 0 ? Number(dpr) : 1,
+        url,
+        closed: false
+      }
+      sessions.set(id, entry)
+      wireEvents(entry)
+      await send(entry, 'Page.enable')
+      await send(entry, 'Network.enable')
+      // Per-session UA override wins over defaultUserAgent and MUST be applied
+      // before navigate so the very first request carries it.
+      const effectiveUserAgent = isValidUserAgent(userAgent)
+        ? userAgent
+        : (isValidUserAgent(defaultUserAgent) ? defaultUserAgent : null)
+      if (effectiveUserAgent) {
+        await send(entry, 'Network.setUserAgentOverride', { userAgent: effectiveUserAgent })
+      }
+      if (Number(dpr) > 0) {
+        await send(entry, 'Emulation.setDeviceMetricsOverride', {
+          width: w, height: h, deviceScaleFactor: entry.dpr, mobile: false
+        })
+      }
+      await send(entry, 'Page.navigate', { url })
+      await startScreencast(entry)
+      return { id }
+    } catch (error) {
+      // A failed or aborted open must never leave the just-launched browser
+      // process running (observed: orphaned chrome from opens that threw after
+      // the launch), so reap the handle before re-throwing.
+      if (entry) {
+        sessions.delete(id)
+        destroy(entry)
+      } else {
+        try { if (handle && typeof handle.close === 'function') handle.close() } catch {}
+        try { if (handle && typeof handle.kill === 'function') handle.kill() } catch {}
+      }
+      throw error
     }
-    sessions.set(id, entry)
-    wireEvents(entry)
-    await send(entry, 'Page.enable')
-    await send(entry, 'Network.enable')
-    // Per-session UA override wins over defaultUserAgent and MUST be applied
-    // before navigate so the very first request carries it.
-    const effectiveUserAgent = isValidUserAgent(userAgent)
-      ? userAgent
-      : (isValidUserAgent(defaultUserAgent) ? defaultUserAgent : null)
-    if (effectiveUserAgent) {
-      await send(entry, 'Network.setUserAgentOverride', { userAgent: effectiveUserAgent })
-    }
-    if (Number(dpr) > 0) {
-      await send(entry, 'Emulation.setDeviceMetricsOverride', {
-        width: w, height: h, deviceScaleFactor: entry.dpr, mobile: false
-      })
-    }
-    await send(entry, 'Page.navigate', { url })
-    await startScreencast(entry)
-    return { id }
   }
 
   async function input ({ id, t, kind, x, y, button, buttons, clickCount, modifiers, dx, dy, key } = {}) {

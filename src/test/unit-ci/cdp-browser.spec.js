@@ -364,6 +364,29 @@ test('close is a no-op for an unknown session', async () => {
   assert.equal(f.cdp.count(), 0)
 })
 
+test('a failed open reaps the just-launched browser handle so nothing leaks', async () => {
+  const f = fixture({ cdpClient: async () => { throw new Error('transport closed') } })
+  await assert.rejects(f.cdp.open({ id: 'a', url: 'https://a.com' }), /transport closed/)
+  assert.equal(f.launches.length, 1, 'the browser was launched')
+  assert.equal(f.launches[0].handle.killed, true, 'the launched browser was reaped')
+  assert.equal(f.cdp.count(), 0, 'no session is left behind')
+})
+
+test('an open that throws after the client attaches reaps and clears the session', async () => {
+  const badClient = {
+    sent: [],
+    closed: false,
+    send (method, params) { this.sent.push({ method, params: params || {} }); return Promise.resolve({}) },
+    on () { throw new Error('wire failed') },
+    close () { this.closed = true }
+  }
+  const f = fixture({ cdpClient: async () => badClient })
+  await assert.rejects(f.cdp.open({ id: 'a', url: 'https://a.com' }), /wire failed/)
+  assert.equal(f.cdp.count(), 0, 'no session is left behind')
+  assert.equal(badClient.closed, true, 'the attached client was closed on reap')
+  assert.equal(f.launches[0].handle.killed, true, 'the launched browser was reaped')
+})
+
 test('disposeAll closes every live session', async () => {
   const f = fixture()
   await f.cdp.open({ id: 'a', url: 'https://a.com' })

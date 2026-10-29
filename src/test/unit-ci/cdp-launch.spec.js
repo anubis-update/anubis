@@ -294,3 +294,13 @@ test('launcher continues when the profile copy fails (best-effort seed)', async 
   assert.equal(handle.mode, 'pipe')
   assert.equal(f.spawns.length, 1)
 })
+
+test('launcher fails fast with PROFILE_SOURCE_MISSING when the source profile is absent', async () => {
+  const f = launchFixture({ fsExists: () => false })
+  await assert.rejects(
+    f.launch.launcher({ id: 'a', url: 'https://x.com', browser: 'chrome' }),
+    (error) => error.code === 'PROFILE_SOURCE_MISSING'
+  )
+  assert.equal(f.spawns.length, 0, 'no browser is spawned when the source profile is missing')
+  assert.equal(f.copies.length, 0, 'no copy is attempted when the source profile is missing')
+})

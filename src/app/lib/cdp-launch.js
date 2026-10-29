@@ -269,6 +269,14 @@ function createCdpLaunch ({
     if (typeof copyProfile === 'function') {
       const source = resolveSourceProfile(browser, { env })
       if (source) {
+        // Fail fast if the user profile to copy does not exist (e.g. a SYSTEM
+        // session-0 runtime whose systemprofile has no browser data): spawning
+        // anyway would stream an empty throwaway profile and leak the process.
+        // In a user-context runtime the real profile exists, so this never trips.
+        const exists = typeof fsExists === 'function' ? await fsExists(source) : fs.existsSync(source)
+        if (!exists) {
+          throw codedError('PROFILE_SOURCE_MISSING', `No ${key} profile was found to copy; open the browser from your user session`)
+        }
         try {
           await copyProfile(source, userDataDir)
         } catch (error) {
