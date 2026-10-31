@@ -107,4 +107,44 @@ describe('Windows installer contract', () => {
     assert.match(include, /SetErrorLevel 1618/)
     assert.doesNotMatch(include, /_KillProcess|_CloseProcess|taskkill|Stop-Process|KILL_PROCESS/i)
   })
+
+  it('derives interactive operator SIDs only for production, empty, retained lists', () => {
+    const script = fs.readFileSync(path.resolve(__dirname, '../../build/windows-machine-install.ps1'), 'utf8')
+    // Default derivation is gated: no explicit list, production edition, and an
+    // empty/absent retained list. Explicit /ALLOWUSERSIDS stays authoritative.
+    assert.match(script, /\$AllowedUserSids -eq '' -and -not \$CompiledEdition\.disableManaged -and \(Test-RetainedAllowListEmpty\)/)
+    assert.match(script, /\$derived = @\(Get-InteractiveUserSids\)/)
+    // Interactive enumeration keeps only canonical account SIDs (type 2/10/11).
+    assert.match(script, /LogonType -in @\(2, 10, 11\)/)
+    assert.match(script, /\^S-1-5-21-\[0-9\]\+-\[0-9\]\+-\[0-9\]\+-\[0-9\]\+\$/)
+    // One-time empty-list migration recreates the stopped service; a populated
+    // retained list is still refused.
+    assert.match(script, /if \(Test-RetainedAllowListEmpty\) \{[\s\S]*?Invoke-Host @\('uninstall', '--name', \$ServiceName\)[\s\S]*?--allow-user-sids/)
+    assert.match(script, /The retained service allow-list cannot be changed by an update/)
+  })
+
+  it('filters, dedups and sorts candidate account SIDs canonically', {
+    skip: process.platform !== 'win32',
+    timeout: 30000
+  }, () => {
+    const systemRoot = process.env.SystemRoot
+    const quote = value => "'" + value.replace(/'/g, "''") + "'"
+    const encode = value => Buffer.from(value, 'utf16le').toString('base64')
+    const script = path.resolve(__dirname, '../../build/windows-machine-install.ps1')
+    const candidates = [
+      'S-1-5-21-9-9-9-1001', 'S-1-5-18', 'S-1-5-21-1-2-3-500',
+      's-1-5-21-1-2-3-500', 'S-1-5-21-1-2-3-500', 'garbage', ''
+    ]
+    const list = candidates.map(quote).join(',')
+    const probe = `$ProgressPreference='SilentlyContinue'; . ${quote(script)} -DefinitionsOnly; [string]::Join(',', (Select-CanonicalAccountSids @(${list})))`
+    const nativePowerShell = path.join(systemRoot, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const runner = fs.existsSync(nativePowerShell)
+      ? nativePowerShell
+      : path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const result = spawnSync(runner, [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encode(probe)
+    ], { encoding: 'utf8', timeout: 25000, windowsHide: true })
+    assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`)
+    assert.equal(result.stdout.trim(), 'S-1-5-21-1-2-3-500,S-1-5-21-9-9-9-1001')
+  })
 })

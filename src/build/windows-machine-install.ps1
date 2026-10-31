@@ -517,6 +517,54 @@ function Uninstall-PreviousMachinePackage {
   }
 }
 
+function Select-CanonicalAccountSids([string[]] $Candidates) {
+  $seen = New-Object System.Collections.Generic.List[string]
+  foreach ($candidate in @($Candidates)) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    $sid = $candidate.Trim()
+    if ($sid -notmatch '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+$') { continue }
+    try {
+      if ((New-Object Security.Principal.SecurityIdentifier($sid)).Value -cne $sid) { continue }
+    } catch { continue }
+    if (-not $seen.Contains($sid)) { $seen.Add($sid) }
+  }
+  return [string[]]@($seen | Sort-Object)
+}
+
+# Enumerates the SIDs of currently logged-on interactive operators (local or RDP)
+# so a silent install can authorize them without a manual /ALLOWUSERSIDS list.
+# Runs as the elevated admin installer (no SeTcbPrivilege), hence CIM rather than
+# the SYSTEM-only WTS token path the running host uses.
+function Get-InteractiveUserSids {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  try {
+    $interactive = @{}
+    foreach ($session in @(Get-CimInstance Win32_LogonSession -ErrorAction Stop)) {
+      if ($session.LogonType -in @(2, 10, 11)) { $interactive[[string]$session.LogonId] = $true }
+    }
+    foreach ($assoc in @(Get-CimInstance Win32_LoggedOnUser -ErrorAction Stop)) {
+      if (-not $interactive.ContainsKey([string]$assoc.Dependent.LogonId)) { continue }
+      $name = $assoc.Antecedent.Name
+      $domain = $assoc.Antecedent.Domain
+      if ([string]::IsNullOrEmpty($name)) { continue }
+      $account = if ([string]::IsNullOrEmpty($domain)) { $name } else { "$domain\$name" }
+      try {
+        $candidates.Add((New-Object Security.Principal.NTAccount($account)).Translate([Security.Principal.SecurityIdentifier]).Value)
+      } catch { }
+    }
+  } catch { }
+  return Select-CanonicalAccountSids $candidates.ToArray()
+}
+
+function Test-RetainedAllowListEmpty {
+  $root = Get-NativeProgramData
+  foreach ($leaf in @('Anubis', 'Host', $ServiceName)) { $root = Join-Path $root $leaf }
+  $configFile = Join-Path $root 'host.json'
+  if (-not (Test-Path -LiteralPath $configFile)) { return $true }
+  $hostConfig = [IO.File]::ReadAllText($configFile) | ConvertFrom-Json
+  return ($null -eq $hostConfig.allowedUserSids -or @($hostConfig.allowedUserSids).Count -eq 0)
+}
+
 function Invoke-MachineInstall {
   if (-not [Environment]::Is64BitOperatingSystem) { throw 'Machine service requires Windows x64' }
   if (-not [Environment]::Is64BitProcess) { throw 'Machine installation requires native x64 PowerShell' }
@@ -525,12 +573,20 @@ function Invoke-MachineInstall {
     throw 'An elevated administrator is required'
   }
   $AllowedUserSids = Read-AllowedUserSids $SidListFile
+  # Production default: with no explicit /ALLOWUSERSIDS, authorize the logged-on
+  # interactive operator(s) so Chrome/Edge user contexts are reachable without a
+  # manual allow-list. Only an empty/absent retained list is ever derived onto;
+  # explicit SIDs stay authoritative and QA editions stay empty.
+  if ($AllowedUserSids -eq '' -and -not $CompiledEdition.disableManaged -and (Test-RetainedAllowListEmpty)) {
+    $derived = @(Get-InteractiveUserSids)
+    if ($derived.Count -gt 0) { $AllowedUserSids = ($derived -join ',') }
+  }
   Assert-Destination $InstallDir -AllowInstallerFiles:($Action -eq 'Finish')
   $marker = Join-Path $InstallDir 'anubis-machine-install.json'
   switch ($Action) {
     'Prepare' {
       Invoke-UserMigration ($MigrationRequested -eq '1') $false
-      if ($AllowedUserSids -ne '' -and $null -ne (Get-OwnedService)) {
+      if ($AllowedUserSids -ne '' -and $null -ne (Get-OwnedService) -and -not (Test-RetainedAllowListEmpty)) {
         throw 'The retained service allow-list cannot be changed by an update'
       }
       if (Test-Path -LiteralPath $InstallDir) {
@@ -567,7 +623,16 @@ function Invoke-MachineInstall {
         $installed = Invoke-Host $arguments -Json
         if ($installed.installed -ne $true) { throw 'Service installation was not confirmed' }
       } elseif ($AllowedUserSids -ne '') {
-        throw 'The retained service allow-list cannot be changed by an update'
+        if (Test-RetainedAllowListEmpty) {
+          # One-time migration: an empty retained allow-list adopts the operator
+          # SIDs by recreating the already-stopped service. A populated list is
+          # never silently changed (matched by the native host guard too).
+          Invoke-Host @('uninstall', '--name', $ServiceName)
+          $installed = Invoke-Host @('install', '--name', $ServiceName, '--install-dir', $InstallDir, '--allow-user-sids', $AllowedUserSids) -Json
+          if ($installed.installed -ne $true) { throw 'Service allow-list migration was not confirmed' }
+        } else {
+          throw 'The retained service allow-list cannot be changed by an update'
+        }
       }
       # This installer-only marker is never emitted into portable/AppX payloads.
       $markerJson = @{ version = 1; serviceName = $ServiceName } | ConvertTo-Json -Compress

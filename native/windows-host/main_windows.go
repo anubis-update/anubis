@@ -244,9 +244,16 @@ func install(c config) (err error) {
 		if err != nil {
 			return err
 		}
-		if existing.Version != c.Version || existing.ServiceName != c.ServiceName ||
-			!samePath(existing.InstallDir, c.InstallDir) || existing.RuntimePath != c.RuntimePath ||
-			!slices.Equal(existing.AllowedSIDs, c.AllowedSIDs) {
+		switch allowListAction(existing, c) {
+		case "keep":
+			// Identical retained config; nothing to rewrite.
+		case "migrate":
+			// One-time migration: an empty retained allow-list adopts the
+			// operator SIDs. A populated list is never silently changed.
+			if err := rewriteConfig(path, c); err != nil {
+				return err
+			}
+		default:
 			return errors.New("retained config differs; no silent overwrite is permitted")
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -289,6 +296,39 @@ func install(c config) (err error) {
 		return errors.Join(err, deleteErr)
 	}
 	return writeJSON(map[string]any{"installed": true, "started": false, "name": c.ServiceName, "configPath": path})
+}
+
+// allowListAction decides how a reinstall over retained host data treats the
+// allow-list. "keep" leaves an identical config untouched, "migrate" permits a
+// one-time adoption of operator SIDs onto an empty retained list, and "reject"
+// refuses every other difference (including changing a populated list).
+func allowListAction(existing, incoming config) string {
+	samePackage := existing.Version == incoming.Version && existing.ServiceName == incoming.ServiceName &&
+		samePath(existing.InstallDir, incoming.InstallDir) && existing.RuntimePath == incoming.RuntimePath
+	switch {
+	case samePackage && slices.Equal(existing.AllowedSIDs, incoming.AllowedSIDs):
+		return "keep"
+	case samePackage && len(existing.AllowedSIDs) == 0 && len(incoming.AllowedSIDs) != 0:
+		return "migrate"
+	default:
+		return "reject"
+	}
+}
+
+// rewriteConfig replaces a retained host.json in place, preserving its existing
+// private owner and ACL, and re-asserts the private-path invariant afterwards.
+func rewriteConfig(path string, c config) error {
+	f, err := os.OpenFile(path, os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	writeErr := json.NewEncoder(f).Encode(c)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	return privatePath(path)
 }
 
 // armRecovery applies the exact protected-host failure policy: restart after
