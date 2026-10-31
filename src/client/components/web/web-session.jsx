@@ -228,6 +228,14 @@ export default function WebSession ({ tab, reloadTab }) {
     } catch (e) {
       decision = { action: 'error' }
     }
+    // Already in the user's Windows context: open the engine in-place. No POST
+    // and no reload (re-routing here would drop the token and bounce the tab to
+    // the terminal start page instead of streaming a Chrome/Edge window).
+    if (decision.action === 'ready') {
+      try { window.localStorage.setItem(intentKey(tab.id), next) } catch (e) {}
+      setEngine(next)
+      return
+    }
     if (decision.action === 'select') {
       try {
         window.localStorage.setItem(intentKey(tab.id), next)

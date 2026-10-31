@@ -40,6 +40,36 @@ test('decideContextAction selects the single signed-in user context', () => {
   assert.deepEqual(result, { action: 'select', id: 'u1' })
 })
 
+test('decideContextAction opens in-place when already in a user context (current)', () => {
+  const result = decideContextAction({
+    supported: true,
+    contexts: [systemCtx(), userCtx('u1')],
+    current: userCtx('u1'),
+    selectedId: 'u1'
+  })
+  assert.deepEqual(result, { action: 'ready', id: 'u1' })
+})
+
+test('decideContextAction opens in-place when selectedId matches a user context', () => {
+  const result = decideContextAction({
+    supported: true,
+    contexts: [systemCtx(), userCtx('u1'), userCtx('u2', 3)],
+    current: systemCtx(),
+    selectedId: 'u2'
+  })
+  assert.deepEqual(result, { action: 'ready', id: 'u2' })
+})
+
+test('decideContextAction still routes when current points at the system context', () => {
+  const result = decideContextAction({
+    supported: true,
+    contexts: [systemCtx('sys'), userCtx('u1')],
+    current: systemCtx('sys'),
+    selectedId: 'sys'
+  })
+  assert.deepEqual(result, { action: 'select', id: 'u1' })
+})
+
 test('decideContextAction flags multiple signed-in users for explicit choice', () => {
   const result = decideContextAction({ supported: true, contexts: [userCtx('u1'), userCtx('u2', 3)] })
   assert.deepEqual(result, { action: 'multiple' })

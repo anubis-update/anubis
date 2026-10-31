@@ -31,6 +31,7 @@ function isUserContext (choice) {
 // Decide what to do when the operator selects Chrome/Edge, given the context
 // catalog returned by GET /_anubis/contexts. The result is a plain object the
 // JSX layer acts on; all copy is plain, neutral English (no "success"/green).
+//   { action: 'ready', id }    already routed into a signed-in user context
 //   { action: 'select', id }   exactly one signed-in Windows user context
 //   { action: 'multiple' }     several signed-in users; operator must choose
 //   { action: 'none' }         no signed-in Windows user session to route to
@@ -40,6 +41,14 @@ function decideContextAction (catalog) {
     return { action: 'unsupported' }
   }
   const users = catalog.contexts.filter(isUserContext)
+  // The gateway echoes the session's active selection as `current`/`selectedId`.
+  // When it already points at a signed-in user context, re-picking Chrome/Edge
+  // must NOT route and reload again: a second select drops the session token and
+  // bounces the tab back to the terminal start page. Just open in-place instead.
+  const active = isUserContext(catalog.current)
+    ? catalog.current
+    : users.find(user => user.id === catalog.selectedId)
+  if (active) return { action: 'ready', id: active.id }
   if (users.length === 1) return { action: 'select', id: users[0].id }
   if (users.length > 1) return { action: 'multiple' }
   return { action: 'none' }
