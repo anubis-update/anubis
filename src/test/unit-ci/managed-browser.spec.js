@@ -214,8 +214,8 @@ test('administrator grants require the private transport, exact browser binding 
   assert.equal((await request(payload)).status, 403)
   assert.equal((await request(payload, { 'x-anubis-managed-session': 'b'.repeat(64) })).status, 403)
   for (const value of [
-    { ...payload, expiresAt: Date.now() - 1 },
-    { ...payload, expiresAt: Date.now() + 9 * 60 * 60 * 1000 },
+    { ...payload, expiresAt: Date.now() - (60 * 60 * 1000 + 60000) },
+    { ...payload, expiresAt: Date.now() + 10 * 60 * 60 * 1000 },
     { ...payload, role: 'user' },
     { ...payload, extra: true }
   ]) assert.equal((await request(value, { 'x-anubis-managed-session': bindingId })).status, 403)
@@ -227,6 +227,27 @@ test('administrator grants require the private transport, exact browser binding 
   assert.equal(value.bindingId, bindingId)
   assert.equal(value.expiresAt, expiresAt)
   assert.match(value.token, /^[a-f0-9]{64}$/)
+})
+
+test('administrator expiry tolerates bounded clock skew in either direction', async t => {
+  const f = await fixture(t, { requirePassword: true })
+  const bindingId = 'c'.repeat(64)
+  const request = expiresAt => fetch(f.origin + '/api/managed-role-login', {
+    method: 'POST',
+    headers: { ...f.headers, 'content-type': 'application/json', 'x-anubis-managed-session': bindingId },
+    body: JSON.stringify({ role: 'administrator', bindingId, expiresAt })
+  })
+  // Device clock behind the gateway: expiresAt beyond SESSION_TTL but within the skew is accepted.
+  const behind = await request(Date.now() + 8 * 60 * 60 * 1000 + 30 * 60 * 1000)
+  assert.equal(behind.status, 200)
+  assert.equal((await behind.json()).role, 'administrator')
+  // Device clock ahead of the gateway: a freshly issued token looks slightly expired but is accepted.
+  const ahead = await request(Date.now() - 30 * 60 * 1000)
+  assert.equal(ahead.status, 200)
+  assert.match((await ahead.json()).token, /^[a-f0-9]{64}$/)
+  // Beyond the tolerance in either direction is still rejected.
+  assert.equal((await request(Date.now() - (60 * 60 * 1000 + 60000))).status, 403)
+  assert.equal((await request(Date.now() + 10 * 60 * 60 * 1000)).status, 403)
 })
 
 test('real browser WebSockets proxy text and binary using private native credentials', async t => {
