@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious')]
+  [ValidateSet('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start')]
   [string] $Action,
   [string] $InstallDir,
   [string] $SidListFile,
@@ -668,6 +668,29 @@ function Invoke-MachineInstall {
 }
 
 if (-not $DefinitionsOnly) {
+  if ($Action -eq 'Start') {
+    # Fail-safe recovery invoked only from the installer's abort path. It never
+    # blocks that abort or validates package state: it only brings the already
+    # registered owned service back so a failed setup can't leave the machine
+    # without a running host. Always exits 0.
+    try {
+      $status = Get-OwnedService
+      if ($null -ne $status) {
+        try { Invoke-Host @('arm', '--name', $ServiceName) } catch { }
+        if ($status.scm.State -ne 4) { try { Invoke-Host @('start', '--name', $ServiceName) } catch { } }
+        try { Wait-ServiceState 4 } catch { }
+      }
+    } catch {
+      # The on-disk package may be mid-replacement; fall back to a raw SCM start
+      # so the service still returns without the native broker.
+      try {
+        if (@(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue).Count -ne 0) {
+          Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        }
+      } catch { }
+    }
+    exit 0
+  }
   try {
     Invoke-MachineInstall
     Write-Output "Machine installer action $Action completed."

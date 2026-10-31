@@ -108,6 +108,24 @@ describe('Windows installer contract', () => {
     assert.doesNotMatch(include, /_KillProcess|_CloseProcess|taskkill|Stop-Process|KILL_PROCESS/i)
   })
 
+  it('never leaves the machine host stopped when setup aborts after taking it down', () => {
+    const script = fs.readFileSync(path.resolve(__dirname, '../../build/windows-machine-install.ps1'), 'utf8')
+    // The abort handler must restore the owned service, but only once and only
+    // when a Prepare/Stop already took it down, before quitting.
+    assert.match(
+      include,
+      /Function AnubisFail\s+;[\s\S]*?\$\{If\} \$AnubisServiceStopped == 1\s+StrCpy \$AnubisServiceStopped 0\s+!insertmacro AnubisMachineAction Start\s+\$\{EndIf\}/
+    )
+    // The down-state flag is armed right after each service stop.
+    assert.match(include, /!insertmacro AnubisMachineAction Prepare\s+StrCpy \$AnubisServiceStopped 1/)
+    assert.match(include, /!else\s+StrCpy \$AnubisServiceStopped 1\s+StrCpy \$AnubisMessage "Waiting up to 60 seconds/)
+    assert.match(include, /StrCpy \$AnubisServiceStopped 0\s+\$\{GetParameters\}/)
+    // The recovery action is best-effort: it never validates package state and
+    // always exits 0, so it can never re-enter the abort path.
+    assert.match(script, /\[ValidateSet\('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start'\)\]/)
+    assert.match(script, /if \(\$Action -eq 'Start'\) \{[\s\S]*?Invoke-Host @\('arm', '--name', \$ServiceName\)[\s\S]*?Start-Service -Name \$ServiceName -ErrorAction SilentlyContinue[\s\S]*?exit 0/)
+  })
+
   it('derives interactive operator SIDs only for production, empty, retained lists', () => {
     const script = fs.readFileSync(path.resolve(__dirname, '../../build/windows-machine-install.ps1'), 'utf8')
     // Default derivation is gated: no explicit list, production edition, and an

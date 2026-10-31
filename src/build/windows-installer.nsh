@@ -62,6 +62,7 @@
   Var AnubisMessage
   Var AnubisAllowedUserSids
   Var AnubisMigratePerUser
+  Var AnubisServiceStopped
 
   Function AnubisPrint
     DetailPrint "$AnubisMessage"
@@ -83,6 +84,14 @@
   FunctionEnd
 
   Function AnubisFail
+    ; Fail-safe: setup aborts only after Prepare/Stop already took the owned
+    ; service down. Bring it back before quitting so a failed install never
+    ; leaves the machine without a running host. The Start action is itself
+    ; best-effort and always exits 0, so it never re-enters AnubisFail.
+    ${If} $AnubisServiceStopped == 1
+      StrCpy $AnubisServiceStopped 0
+      !insertmacro AnubisMachineAction Start
+    ${EndIf}
     Call AnubisPrint
     ${If} $AnubisConsoleMode == 0
       MessageBox MB_OK|MB_ICONSTOP "$AnubisMessage" /SD IDOK
@@ -95,6 +104,7 @@
     SetErrorLevel 1
     StrCpy $AnubisConsole 0
     StrCpy $AnubisConsoleMode 0
+    StrCpy $AnubisServiceStopped 0
     ${GetParameters} $R0
     ClearErrors
     ${GetOptions} $R0 "--silent" $R1
@@ -171,6 +181,7 @@
     ${EndIf}
     StrCpy $INSTDIR "$PROGRAMFILES64\${ANUBIS_MACHINE_LEAF}"
     !insertmacro AnubisMachineAction Prepare
+    StrCpy $AnubisServiceStopped 1
     StrCpy $AnubisMessage "Selected scope: $installMode. Destination: $INSTDIR"
     Call AnubisPrint
   !macroend
@@ -344,6 +355,7 @@
       Quit
     ${EndIf}
   !else
+    StrCpy $AnubisServiceStopped 1
     StrCpy $AnubisMessage "Waiting up to 60 seconds for Anubis to exit normally; no sessions will be terminated."
     Call AnubisPrint
     StrCpy $R2 120
