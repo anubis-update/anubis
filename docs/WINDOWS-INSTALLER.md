@@ -43,7 +43,8 @@ tree exactly, with no missing, changed or unexpected files.
 
 ## Installation and explicit authorization
 
-Setup is silent after UAC, never launches the GUI, and returns zero only after
+Setup shows installer UI after UAC by default (use `--silent` for unattended runs),
+never launches the application GUI, and returns zero only after
 native package validation, SCM Running, and a broker identity check confirm the
 actual SYSTEM/session-0 host **and machine engine**. SCM Running is published by
 the native host only after engine/control readiness. `--console` adds installer
@@ -601,3 +602,13 @@ silently disable requested signing or bypass verification. A successful build
 does not establish fresh-install, upgrade, SCM lifecycle or live protocol
 acceptance. Automatic self-hosted release publication is off unless the
 repository variable `ANUBIS_AUTO_SELF_HOSTED_PUBLISH` is explicitly `true`.
+
+The `v5.7.24` installer-only path is excluded from the normal all-platform tag
+pipeline. Manual dispatch must set `windows_installer_only=true` for exactly
+`v5.7.24`; it runs the Windows NSIS build and prepares only the installer,
+optional blockmap and checksum manifest. The tag is checked before work starts
+and rechecked immediately before creation. `publish=false` only builds the
+artifact; `publish=true` creates the tag and GitHub release after all required
+gates pass. The self-hosted deployment job is explicitly excluded for this
+version. External release webhooks are independent of these workflow guards
+and may react to a GitHub release event.

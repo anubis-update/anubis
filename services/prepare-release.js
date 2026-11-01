@@ -5,15 +5,17 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 
-async function prepareRelease (input, output, version) {
+async function prepareRelease (input, output, version, { windowsInstallerOnly = false } = {}) {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version || '')) {
     throw new Error('A valid release version is required')
   }
-  const suffixes = [
-    'win-x64-installer.exe', 'win-x64-portable.tar.gz', 'win-x64.tar.gz',
-    'linux-amd64.deb', 'linux-x64.tar.gz', 'linux-x86_64.AppImage',
-    'mac-x64.dmg', 'mac-arm64.dmg'
-  ]
+  const suffixes = windowsInstallerOnly
+    ? ['win-x64-installer.exe']
+    : [
+        'win-x64-installer.exe', 'win-x64-portable.tar.gz', 'win-x64.tar.gz',
+        'linux-amd64.deb', 'linux-x64.tar.gz', 'linux-x86_64.AppImage',
+        'mac-x64.dmg', 'mac-arm64.dmg'
+      ]
   const required = suffixes.map(suffix => `anubis-${version}-${suffix}`)
   const allowed = new Set(required.flatMap(name => [name, `${name}.blockmap`]))
   const found = new Map()
@@ -48,12 +50,21 @@ async function prepareRelease (input, output, version) {
 }
 
 if (require.main === module) {
-  prepareRelease(...process.argv.slice(2)).then(count => {
-    console.log(`Prepared ${count} release artifacts and SHA256SUMS`)
-  }).catch(error => {
-    console.error('Release preparation failed:', error.message)
-    process.exitCode = 1
-  })
+  const [input, output, version, ...flags] = process.argv.slice(2)
+  const unknownFlags = flags.filter(flag => flag !== '--windows-installer-only')
+  if (unknownFlags.length) {
+    console.error(`Unknown release option: ${unknownFlags[0]}`)
+    process.exitCode = 2
+  } else {
+    prepareRelease(input, output, version, {
+      windowsInstallerOnly: flags.includes('--windows-installer-only')
+    }).then(count => {
+      console.log(`Prepared ${count} release artifacts and SHA256SUMS`)
+    }).catch(error => {
+      console.error('Release preparation failed:', error.message)
+      process.exitCode = 1
+    })
+  }
 }
 
 module.exports = { prepareRelease }

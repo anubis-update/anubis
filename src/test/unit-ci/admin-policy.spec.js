@@ -16,8 +16,9 @@ describe('admin-policy (main process)', () => {
       fontSize: 20,
       syncSetting: { cloudApiUrl: 'https://evil.example', autoSync: false }
     }, { env: {} })
-    assert.equal(res.baseURLAI, brand.ai.baseURL)
-    assert.equal(res.apiPathAI, '/chat/completions')
+    // AI endpoint keys are user-configurable by default: a user value is kept
+    assert.equal(res.baseURLAI, 'https://evil.example/v1')
+    assert.equal(res.apiPathAI, '/x')
     assert.equal(res.checkUpdateOnStart, true)
     assert.equal(res.mcpServerEnabled, true)
     assert.equal(res.autoStartOnLogin, true)
@@ -25,12 +26,17 @@ describe('admin-policy (main process)', () => {
     // user level settings are untouched
     assert.equal(res.fontSize, 20)
     assert.equal(res.syncSetting.autoSync, false)
+    // when absent, AI endpoint keys default to the brand endpoint
+    const def = policy.applyAdminPolicy({ fontSize: 20 }, { env: {} })
+    assert.equal(def.baseURLAI, brand.ai.baseURL)
+    assert.equal(def.apiPathAI, '/chat/completions')
   })
 
   it('partial updates do not create nested parents', () => {
     const res = policy.applyAdminPolicy({ fontSize: 12 }, { partial: true, env: {} })
     assert.equal(res.syncSetting, undefined)
-    assert.equal(res.baseURLAI, brand.ai.baseURL)
+    // unlocked AI keys are not injected into a partial update
+    assert.equal(res.baseURLAI, undefined)
   })
 
   it('error report url points to api subdomain and is on by default', () => {
@@ -88,6 +94,23 @@ describe('admin-policy (main process)', () => {
       ANUBIS_ADMIN_CUSTOM_SYNC_SECRET: 'weak',
       ANUBIS_ADMIN_CUSTOM_SYNC_USER: 'b'.repeat(32)
     }), /at least 32/)
+  })
+
+  it('AI endpoint keys are unlocked by default and re-lockable via env', () => {
+    const unlocked = policy.getAdminLockedKeys({})
+    assert.ok(!unlocked.includes('baseURLAI'))
+    assert.ok(!unlocked.includes('apiPathAI'))
+    assert.ok(!unlocked.includes('authHeaderNameAI'))
+    for (const flag of ['1', 'true']) {
+      const locked = policy.getAdminLockedKeys({ ANUBIS_ADMIN_AI_LOCK: flag })
+      assert.ok(locked.includes('baseURLAI'))
+      assert.ok(locked.includes('apiPathAI'))
+      assert.ok(locked.includes('authHeaderNameAI'))
+    }
+    const res = policy.applyAdminPolicy({ baseURLAI: 'https://evil.example/v1' }, {
+      env: { ANUBIS_ADMIN_AI_LOCK: '1' }
+    })
+    assert.equal(res.baseURLAI, brand.ai.baseURL)
   })
 
   it('proxy is not locked without admin proxy', () => {

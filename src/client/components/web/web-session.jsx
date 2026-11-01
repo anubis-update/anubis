@@ -1,6 +1,25 @@
 import AddressBar from './address-bar'
 import WebAuthModal from './web-auth-modal'
+import RbiView from './rbi-view'
+import WebBrowserGate from './web-browser-gate'
+import { notification } from '../common/notification'
+import { handleErr } from '../../common/fetch'
+import { buildProfile, sanitizeFileBase } from './browser-profile'
+import { isCdpEngine } from './engine-options'
+import { CONTEXT_ROUTE, intentKey, decideContextAction, noteFor } from './web-context'
 import React, { useState, useRef, useEffect, useCallback } from 'react'
+
+function downloadJson (obj, fileName) {
+  const blob = new window.Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' })
+  const href = window.URL.createObjectURL(blob)
+  const a = window.document.createElement('a')
+  a.href = href
+  a.download = fileName
+  window.document.body.appendChild(a)
+  a.click()
+  window.document.body.removeChild(a)
+  window.URL.revokeObjectURL(href)
+}
 
 export default function WebSession ({ tab, reloadTab }) {
   const { url = '' } = tab
@@ -11,6 +30,11 @@ export default function WebSession ({ tab, reloadTab }) {
   const [loadError, setLoadError] = useState('')
   const [authRequest, setAuthRequest] = useState(null)
   const webviewRef = useRef(null)
+  const rbiRef = useRef(null)
+  const pendingRef = useRef(null)
+  const [activeUa, setActiveUa] = useState('')
+  const [engine, setEngine] = useState('rbi')
+  const [contextNote, setContextNote] = useState('')
   let valid = false
   try {
     valid = ['http:', 'https:'].includes(new URL(url).protocol)
@@ -125,18 +149,133 @@ export default function WebSession ({ tab, reloadTab }) {
   }, [native, authRequest])
   const cancelAuth = useCallback(() => respond('', ''), [respond])
 
+  // Cookies exported from the RBI session arrive here. A pending-action flag set
+  // just before the export request decides whether we write a plain cookies file
+  // or bundle them (with the active user agent) into a profile.
+  const handleCookies = useCallback((cookies) => {
+    const pending = pendingRef.current
+    pendingRef.current = null
+    const list = Array.isArray(cookies) ? cookies : []
+    try {
+      if (pending && pending.type === 'profile') {
+        const bundle = buildProfile({ name: pending.name, userAgent: activeUa, cookies: list })
+        downloadJson(bundle, `${sanitizeFileBase(bundle.name)}.anubisprofile.json`)
+        notification.success({ message: 'Profile saved', description: `${bundle.name} (${list.length} cookies)` })
+      } else {
+        downloadJson(list, `cookies-${tab.id}.json`)
+        notification.success({ message: `Exported ${list.length} cookies` })
+      }
+    } catch (error) {
+      handleErr({ message: 'Cookie export failed: ' + error.message })
+    }
+  }, [tab.id, activeUa])
+
+  const onApplyUa = useCallback((ua) => {
+    setActiveUa(typeof ua === 'string' ? ua.trim() : '')
+  }, [])
+
+  const onExportCookies = useCallback(() => {
+    pendingRef.current = { type: 'export' }
+    rbiRef.current?.send({ t: 'cookies-export' })
+  }, [])
+
+  const onImportCookies = useCallback((cookies) => {
+    const list = Array.isArray(cookies) ? cookies : []
+    rbiRef.current?.send({ t: 'cookies-import', cookies: list })
+    notification.success({ message: `Imported ${list.length} cookies` })
+  }, [])
+
+  const onSaveProfile = useCallback((name) => {
+    pendingRef.current = { type: 'profile', name }
+    rbiRef.current?.send({ t: 'cookies-export' })
+  }, [])
+
+  const onLoadProfile = useCallback((bundle) => {
+    setActiveUa(typeof bundle.userAgent === 'string' ? bundle.userAgent.trim() : '')
+    const list = Array.isArray(bundle.cookies) ? bundle.cookies : []
+    rbiRef.current?.send({ t: 'cookies-import', cookies: list })
+    notification.success({ message: 'Profile loaded', description: `${bundle.name} (${list.length} cookies)` })
+  }, [])
+
+  // Re-apply the engine a context switch reloaded for. Selecting Chrome/Edge
+  // auto-selects the user's Windows workspace context and reloads (see
+  // onChangeEngine); the chosen engine is stashed per tab so the reloaded tab
+  // re-opens with it instead of silently reverting to RBI.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(intentKey(tab.id))
+      if (isCdpEngine(saved)) setEngine(saved)
+    } catch (e) {}
+  }, [tab.id])
+
+  // Chrome/Edge only stream from the logged-on user's Windows workspace context
+  // (session >= 1); the default SYSTEM runtime has no user profile or desktop.
+  // When the operator picks Chrome/Edge we auto-select the single signed-in user
+  // context through the shipped /_anubis/contexts endpoint (the gateway then
+  // persists that selector across the reload), so no manual context pick is
+  // needed. RBI needs no context and is applied immediately.
+  const onChangeEngine = useCallback(async (next) => {
+    setContextNote('')
+    if (!isCdpEngine(next)) {
+      try { window.localStorage.removeItem(intentKey(tab.id)) } catch (e) {}
+      setEngine(next)
+      return
+    }
+    let decision = { action: 'error' }
+    try {
+      const res = await window.fetch(CONTEXT_ROUTE, { credentials: 'same-origin', cache: 'no-store' })
+      decision = res.ok ? decideContextAction(await res.json()) : { action: 'unsupported' }
+    } catch (e) {
+      decision = { action: 'error' }
+    }
+    // Already in the user's Windows context: open the engine in-place. No POST
+    // and no reload (re-routing here would drop the token and bounce the tab to
+    // the terminal start page instead of streaming a Chrome/Edge window).
+    if (decision.action === 'ready') {
+      try { window.localStorage.setItem(intentKey(tab.id), next) } catch (e) {}
+      setEngine(next)
+      return
+    }
+    if (decision.action === 'select') {
+      try {
+        window.localStorage.setItem(intentKey(tab.id), next)
+        const res = await window.fetch(CONTEXT_ROUTE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: decision.id })
+        })
+        if (!res.ok) throw new Error('context select failed')
+        window.localStorage.removeItem('tokenElecterm')
+        window.location.reload()
+        return
+      } catch (e) {
+        try { window.localStorage.removeItem(intentKey(tab.id)) } catch (err) {}
+        setContextNote(noteFor('error'))
+        return
+      }
+    }
+    // Could not auto-route: keep RBI working and explain in neutral English.
+    setEngine('rbi')
+    setContextNote(noteFor(decision.action))
+  }, [tab.id])
+
   function renderView () {
     if (!valid) return <div>URL: <b>{url}</b> not valid (HTTP or HTTPS required)</div>
     if (!embedded) {
       return (
-        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-          <div role='note' className='pd1'>
-            Some websites block embedding in a remote browser.
-            {' '}If this page is blank or refused,{' '}
-            <button type='button' onClick={handleOpen}>{window.translate('openInDefaultBrowser')}</button>.
-          </div>
-          <iframe src={url} title={tab.title || 'Website'} style={{ width: '100%', flex: 1, minHeight: 0, border: 'none' }} ref={webviewRef} />
-        </div>
+        <RbiView
+          key={tab.id}
+          ref={rbiRef}
+          tab={tab}
+          url={url}
+          userAgent={activeUa}
+          engine={engine}
+          onNavigate={setCurrentUrl}
+          onError={setLoadError}
+          onCookies={handleCookies}
+        />
       )
     }
     if (native && !partition) return loadError ? null : <div className='pd1'>Opening isolated website...</div>
@@ -156,6 +295,27 @@ export default function WebSession ({ tab, reloadTab }) {
   return (
     <div className='web-session-wrap'>
       {!tab.hideAddressBar && <AddressBar {...addrProps} />}
+      {/*
+        BrowserPanel is a PRO surface. On the web build (!embedded) the gate is
+        now authoritative here: WebBrowserGate reads entitlement from the pinned
+        gateway (GET /_anubis/browser-entitlement) each time the panel opens and
+        is fail-closed, rendering the panel only when the gateway confirms the
+        device is entitled; otherwise it shows the activation flow. The sidebar
+        gate (menu-preview.jsx) remains the desktop-build path and is untouched.
+      */}
+      {!embedded && valid && (
+        <WebBrowserGate
+          activeUa={activeUa}
+          engine={engine}
+          contextNote={contextNote}
+          onChangeEngine={onChangeEngine}
+          onApplyUa={onApplyUa}
+          onExportCookies={onExportCookies}
+          onImportCookies={onImportCookies}
+          onSaveProfile={onSaveProfile}
+          onLoadProfile={onLoadProfile}
+        />
+      )}
       {loadError && <div role='alert' className='pd1'>Website could not be loaded: {loadError}</div>}
       <div className='web-session-content'>{renderView()}</div>
       <WebAuthModal authRequest={authRequest} onAuthSubmit={respond} onAuthCancel={cancelAuth} />

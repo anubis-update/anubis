@@ -9,13 +9,13 @@
     },
     "resource": {
       "repository": "https://github.com/Anubis-Security-Tool/anubis-resource",
-      "commit": "18da0874b952a3e7e4908b9cc02a548ac178efaa",
+      "commit": "48cdfdbe29663e1bb88d01e739c562540300bb2f",
       "packageName": "@ai-security-tool/resource",
       "version": "2.2.3"
     },
     "managed-access": {
       "repository": "https://github.com/Anubis-Security-Tool/anubis-managed-access",
-      "commit": "bff4b1d4d549cfcca288c0d687b9b8f420a5be19",
+      "commit": "faa5a58e2ea4491d3a1cb988185a70a7839c7abc",
       "packageName": "@ai-security-tool/managed-access",
       "version": "1.0.4"
     },

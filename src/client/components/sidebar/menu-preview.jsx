@@ -1,59 +1,65 @@
 import { useState } from 'react'
 import { auto } from 'manate/react'
-import { Modal, Popover, Tooltip } from 'antd'
+import { Popover, Tooltip } from 'antd'
 import {
-  Wrench, ShieldCheck, Ellipsis, ChevronDown,
-  BookOpen, Zap, CloudCog, Bot, LayoutGrid,
-  Users, Package, Workflow, FileSearch, ShieldAlert, Coins, Globe,
-  Settings, Info, PanelLeftClose
+  SquareTerminal, Swords, Cog, ChevronDown, ChevronRight,
+  Cpu, BookOpen, Zap, CloudCog, LayoutGrid, Settings,
+  Package, Workflow, FileSearch, ShieldAlert, Bot, Globe,
+  Info, CircleHelp, PanelLeftClose, Crown
 } from 'lucide-react'
 import MenuBtn from '../sys-menu/menu-btn'
-import ExternalLink from '../common/external-link'
 import QuickConnect from '../tabs/quick-connect'
-import { brand, modals, settingMap } from '../../common/constants'
+import UpgradeModal from './upgrade-modal'
+import ActivationModal from './activation-modal'
+import { brand, modals, settingMap, infoTabs, terminalWebType } from '../../common/constants'
 import { isAIDisabled } from '../../common/ai-feature'
+import { isEntitled } from '../../common/entitlement'
 import { groupedSidebarIconIds } from '../../common/left-sidebar-icon-defs'
 import './menu-preview.styl'
 
+// Three approved sections. Items with an `id` are user-configurable (ordered /
+// filtered by groupedSidebarIconIds); id-less items are always shown. `pro`
+// items are locked and open the upgrade modal instead of running an action.
+// Arsenal items are two-line: brand product name + the feature it maps to.
 const groups = [
   {
-    label: 'Tools',
-    icon: Wrench,
+    label: 'Console',
+    icon: SquareTerminal,
     items: [
-      { id: 'bookmarks', label: 'Bookmarks', icon: BookOpen },
-      { id: 'quickConnect', label: 'Quick connect', icon: Zap },
-      { id: 'settingSync', label: 'Setting sync', icon: CloudCog },
-      { label: 'AI Agents', icon: Bot },
-      { id: 'widgets', label: 'Widgets', icon: LayoutGrid }
+      { key: 'systemInfo', name: 'System Info', icon: Cpu },
+      { id: 'bookmarks', key: 'bookmarks', name: 'Bookmarks', icon: BookOpen },
+      { id: 'quickConnect', key: 'quickConnect', name: 'Quick connect', icon: Zap },
+      { id: 'settingSync', key: 'settingSync', name: 'Setting sync', icon: CloudCog },
+      { id: 'widgets', key: 'widgets', name: 'Widgets', icon: LayoutGrid },
+      { id: 'setting', key: 'setting', name: 'Setting', icon: Settings }
     ]
   },
   {
-    label: 'PRO Features',
-    icon: ShieldCheck,
-    pro: true,
+    label: 'Arsenal',
+    icon: Swords,
     items: [
-      { label: 'Community', icon: Users },
-      { label: 'Plugin Store', icon: Package },
-      { label: 'Automation', icon: Workflow },
-      { label: 'DLL Scanner', icon: FileSearch },
-      { label: 'CVE Scanner', icon: ShieldAlert },
-      { label: 'Crypto Miner', icon: Coins },
-      { label: 'Browser Control', icon: Globe }
+      { key: 'pluginStore', name: 'Plugin Store', icon: Package, pro: true },
+      { key: 'aiAgents', name: 'Anubis Oracle', sub: 'AI Agents', icon: Bot },
+      { key: 'automation', name: 'Anubis Osiris', sub: 'Automation', icon: Workflow, pro: true },
+      { key: 'dllScanner', name: 'Anubis Scarab', sub: 'DLL Scanner', icon: FileSearch, pro: true },
+      { key: 'cveScanner', name: 'Anubis Aegis', sub: 'CVE Scanner', icon: ShieldAlert, pro: true },
+      { key: 'browser', name: 'Browser', icon: Globe }
     ]
   },
   {
-    label: 'Other',
-    icon: Ellipsis,
+    label: 'System',
+    icon: Cog,
     items: [
-      { id: 'setting', label: 'Setting', icon: Settings },
-      { label: 'About', icon: Info },
-      { label: 'Hide', icon: PanelLeftClose }
+      { key: 'about', name: 'About', icon: Info },
+      { key: 'faq', name: 'FAQ', icon: CircleHelp },
+      { key: 'hide', name: 'Hide', icon: PanelLeftClose }
     ]
   }
 ]
 
 export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children }) {
-  const [preview, setPreview] = useState(null)
+  const [upsell, setUpsell] = useState(null)
+  const [activateOpen, setActivateOpen] = useState(false)
   const { store } = window
   const iconIds = groupedSidebarIconIds(store.config.leftSideBarIcons)
   const configuredGroups = groups.map(group => {
@@ -67,28 +73,62 @@ export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children
   })
   const settingVisible = store.showModal === modals.setting
   const activeItems = {
-    Bookmarks: store.openedSideBar === 'bookmarks',
-    'Setting sync': settingVisible && store.settingTab === settingMap.setting && store.settingItem.id === 'setting-sync',
-    'AI Agents': store.rightPanelVisible && store.rightPanelTab === 'ai',
-    Widgets: settingVisible && store.settingTab === settingMap.widgets,
-    Setting: settingVisible && store.settingTab === settingMap.setting && store.settingItem.id === 'setting-common',
-    About: store.showInfoModal
+    bookmarks: store.openedSideBar === 'bookmarks',
+    settingSync: settingVisible && store.settingTab === settingMap.setting && store.settingItem.id === 'setting-sync',
+    aiAgents: store.rightPanelVisible && store.rightPanelTab === 'ai',
+    widgets: settingVisible && store.settingTab === settingMap.widgets,
+    setting: settingVisible && store.settingTab === settingMap.setting && store.settingItem.id === 'setting-common',
+    about: store.showInfoModal
   }
   const actions = {
-    Bookmarks: handleClickBookmark,
-    'Setting sync': () => store.openSettingSync(),
-    'AI Agents': () => store.toggleAIPanel(),
-    Widgets: () => store.openWidgetsModal(),
-    Setting: () => store.openSetting(),
-    About: () => store.openAbout(),
-    Hide: () => store.toggleLeftSideBar()
+    systemInfo: () => store.openAbout(infoTabs.os),
+    bookmarks: handleClickBookmark,
+    settingSync: () => store.openSettingSync(),
+    aiAgents: () => store.toggleAIPanel(),
+    widgets: () => store.openWidgetsModal(),
+    setting: () => store.openSetting(),
+    about: () => store.openAbout(),
+    faq: () => window.pre.openExternal(brand.domains.docs),
+    hide: () => store.toggleLeftSideBar(),
+    browser: () => store.addTab({
+      type: terminalWebType,
+      url: 'https://www.google.com',
+      title: 'Browser'
+    })
+  }
+
+  // Browser is a PRO feature gated on the per-device managed entitlement.
+  // Strict when a managed status resolves (desktop IPC always returns a
+  // concrete object, so pending/offline/pro:false close the gate -> activation
+  // modal). If the call REJECTS, the runtime has no managed-connectivity global
+  // at all -- the served web build routes globals over WS to the pinned
+  // anubis-web gateway, whose run-sync allowlist does not expose
+  // getManagedConnectivity -- so entitlement is unreadable there. In that case
+  // we fail open and keep the desktop sidebar gate authoritative.
+  // TODO: gate the web client too once the pinned gateway exposes managed
+  // connectivity (entitlement is currently unreachable from the web build).
+  async function openBrowserGated () {
+    let status
+    try {
+      status = await window.pre.runGlobalAsync('getManagedConnectivity')
+    } catch (e) {
+      actions.browser()
+      return
+    }
+    if (isEntitled(status)) {
+      actions.browser()
+    } else {
+      setActivateOpen(true)
+    }
   }
 
   function selectItem (item) {
-    if (item.pro) {
-      setPreview(item)
+    if (item.key === 'browser') {
+      return openBrowserGated()
+    } else if (item.pro) {
+      setUpsell(item.name)
     } else {
-      actions[item.label]()
+      actions[item.key]()
     }
   }
 
@@ -98,36 +138,40 @@ export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children
         <MenuBtn store={store} config={store.config} />
       </div>
       <nav className='preview-navigation' aria-label='Application sections'>
-        {configuredGroups.map(({ label, icon: GroupIcon, items, pro = false }) => (
+        {configuredGroups.map(({ label, icon: GroupIcon, items }) => (
           <details className='preview-group' key={label} open>
             <summary title={label}>
               <GroupIcon size={17} strokeWidth={1.75} aria-hidden='true' />
-              <span className='preview-label'>{label}</span>
+              <span className='preview-label preview-group-title'>{label}</span>
               <ChevronDown className='preview-chevron' size={13} aria-hidden='true' />
             </summary>
-            {items.map(({ label, icon: Icon }) => {
-              const active = pro ? preview?.label === label : activeItems[label]
+            {items.map(({ key, name, sub, icon: Icon, pro = false }) => {
+              const active = activeItems[key]
               const button = (
                 <button
-                  className={`preview-menu-item${active ? ' active' : ''}${label === 'Bookmarks' ? ' bookmark-sidebar-toggle' : ''}`}
+                  className={`preview-menu-item${active ? ' active' : ''}${pro ? ' pro' : ''}${sub ? ' has-sub' : ''}${key === 'bookmarks' ? ' bookmark-sidebar-toggle' : ''}`}
                   type='button'
-                  aria-label={label}
+                  aria-label={sub ? `${name} — ${sub}` : name}
                   aria-current={active ? 'page' : undefined}
-                  disabled={label === 'AI Agents' && isAIDisabled()}
-                  onClick={label === 'Quick connect' ? undefined : () => selectItem({ label, pro })}
+                  disabled={key === 'aiAgents' && isAIDisabled()}
+                  onClick={key === 'quickConnect' ? undefined : () => selectItem({ key, name, pro })}
                 >
                   <Icon size={18} strokeWidth={1.75} aria-hidden='true' />
-                  <span className='preview-label'>{label}</span>
+                  <span className='preview-label preview-item-text'>
+                    <span className='preview-item-name'>{name}</span>
+                    {sub && <span className='preview-item-sub'>{sub}</span>}
+                  </span>
+                  {pro && <span className='preview-pro-tag'>PRO</span>}
                 </button>
               )
-              return label === 'Quick connect'
+              return key === 'quickConnect'
                 ? (
-                  <Popover key={label} content={<QuickConnect inputOnly />} trigger='click' placement='right'>
+                  <Popover key={key} content={<QuickConnect inputOnly />} trigger='click' placement='right'>
                     {button}
                   </Popover>
                   )
                 : (
-                  <Tooltip key={label} title={pro ? 'Available only in the PRO version' : label} placement='right'>
+                  <Tooltip key={key} title={pro ? 'Available only in the PRO version' : (sub ? `${name} — ${sub}` : name)} placement='right'>
                     {button}
                   </Tooltip>
                   )
@@ -138,21 +182,32 @@ export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children
       <div className='preview-footer' role='group' aria-label='Application controls'>
         {children}
       </div>
-      <Modal
-        open={preview !== null}
-        title={preview?.label}
-        onCancel={() => setPreview(null)}
-        footer={null}
-        centered
+      <button
+        type='button'
+        className='preview-account'
+        title='Free version'
+        aria-label='Free version — upgrade available'
+        onClick={() => setUpsell('')}
       >
-        <div className='pro-version-placeholder'>
-          <p>This section is available only in the PRO version.</p>
-          <p>
-            Learn more on our official website:{' '}
-            <ExternalLink to={brand.domains.site}>{brand.domains.site}</ExternalLink>
-          </p>
-        </div>
-      </Modal>
+        <span className='preview-account-icon'>
+          <Crown size={16} strokeWidth={1.75} aria-hidden='true' />
+        </span>
+        <span className='preview-account-text'>
+          <span className='preview-account-name'>Free version</span>
+          <span className='preview-account-sub'>Upgrade available</span>
+        </span>
+        <ChevronRight className='preview-account-chevron' size={15} aria-hidden='true' />
+      </button>
+      <UpgradeModal
+        open={upsell !== null}
+        feature={upsell || ''}
+        onClose={() => setUpsell(null)}
+      />
+      <ActivationModal
+        open={activateOpen}
+        onClose={() => setActivateOpen(false)}
+        onActivated={() => actions.browser()}
+      />
     </>
   )
 })

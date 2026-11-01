@@ -38,6 +38,7 @@ async function fixture (t, { requirePassword = false } = {}) {
     return new Promise(resolve => upstream.close(resolve))
   })
   const port = upstream.address().port
+  let userPassword = 'web-user-password'
   const rpc = async (func, args) => {
     if (func === 'browserInfo') {
       return {
@@ -48,8 +49,9 @@ async function fixture (t, { requirePassword = false } = {}) {
       }
     }
     if (func === 'browserLogin') return args[0] === 'desktop-password'
-    if (func === 'browserUserLogin') return args[0] === 'web-user-password'
+    if (func === 'browserUserLogin') return args[0] === userPassword
     if (func === 'browserRoleLogin') return args[0] === 'administrator'
+    if (func === 'setManagedWebPassword') { userPassword = args[0]; return true }
     return createBrowserRpc({
       functions: {},
       getConfig: () => ({}),
@@ -159,6 +161,46 @@ test('Web user passwords are independent of native profile passwords and reuse a
   assert.match(await page.text(), new RegExp(`localStorage\\.setItem\\('tokenElecterm',"${token}"\\)`))
 })
 
+test('managed Web user password provisioning requires private transport, validates body and rebinds authentication', async t => {
+  const f = await fixture(t)
+  const set = (body, headers = f.headers) => fetch(f.origin + '/api/managed-set-web-password', {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  // Establish a user session on the original password.
+  const original = await fetch(f.origin + '/api/managed-password-login', {
+    method: 'POST',
+    headers: { ...f.headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ password: 'web-user-password' })
+  })
+  assert.equal(original.status, 200)
+  const originalToken = await original.json()
+  assert.equal((await fetch(f.origin + '/api/get-constants', { headers: { ...f.headers, token: originalToken } })).status, 200)
+  // Transport secret is mandatory.
+  assert.equal((await set({ password: 'N3w!vL9@zC4#kT8$x' }, { [HEADER]: 'forged' })).status, 403)
+  // Body is strictly validated.
+  assert.equal((await set({ password: 123 })).status, 400)
+  assert.equal((await set({ password: 'x', extra: true })).status, 400)
+  // Provision a new password.
+  const provisioned = 'N3w!vL9@zC4#kT8$x'
+  assert.deepEqual(await (await set({ password: provisioned })).json(), { ok: true })
+  // The prior session is invalidated and the old password no longer authenticates.
+  assert.equal((await fetch(f.origin + '/api/get-constants', { headers: { ...f.headers, token: originalToken } })).status, 401)
+  assert.equal((await fetch(f.origin + '/api/managed-password-login', {
+    method: 'POST',
+    headers: { ...f.headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ password: 'web-user-password' })
+  })).status, 401)
+  // The new password authenticates.
+  const signedIn = await fetch(f.origin + '/api/managed-password-login', {
+    method: 'POST',
+    headers: { ...f.headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ password: provisioned })
+  })
+  assert.equal(signedIn.status, 200)
+})
+
 test('administrator grants require the private transport, exact browser binding and bounded expiry', async t => {
   const f = await fixture(t, { requirePassword: true })
   const bindingId = 'a'.repeat(64)
@@ -172,8 +214,8 @@ test('administrator grants require the private transport, exact browser binding 
   assert.equal((await request(payload)).status, 403)
   assert.equal((await request(payload, { 'x-anubis-managed-session': 'b'.repeat(64) })).status, 403)
   for (const value of [
-    { ...payload, expiresAt: Date.now() - 1 },
-    { ...payload, expiresAt: Date.now() + 9 * 60 * 60 * 1000 },
+    { ...payload, expiresAt: Date.now() - (60 * 60 * 1000 + 60000) },
+    { ...payload, expiresAt: Date.now() + 10 * 60 * 60 * 1000 },
     { ...payload, role: 'user' },
     { ...payload, extra: true }
   ]) assert.equal((await request(value, { 'x-anubis-managed-session': bindingId })).status, 403)
@@ -185,6 +227,27 @@ test('administrator grants require the private transport, exact browser binding 
   assert.equal(value.bindingId, bindingId)
   assert.equal(value.expiresAt, expiresAt)
   assert.match(value.token, /^[a-f0-9]{64}$/)
+})
+
+test('administrator expiry tolerates bounded clock skew in either direction', async t => {
+  const f = await fixture(t, { requirePassword: true })
+  const bindingId = 'c'.repeat(64)
+  const request = expiresAt => fetch(f.origin + '/api/managed-role-login', {
+    method: 'POST',
+    headers: { ...f.headers, 'content-type': 'application/json', 'x-anubis-managed-session': bindingId },
+    body: JSON.stringify({ role: 'administrator', bindingId, expiresAt })
+  })
+  // Device clock behind the gateway: expiresAt beyond SESSION_TTL but within the skew is accepted.
+  const behind = await request(Date.now() + 8 * 60 * 60 * 1000 + 30 * 60 * 1000)
+  assert.equal(behind.status, 200)
+  assert.equal((await behind.json()).role, 'administrator')
+  // Device clock ahead of the gateway: a freshly issued token looks slightly expired but is accepted.
+  const ahead = await request(Date.now() - 30 * 60 * 1000)
+  assert.equal(ahead.status, 200)
+  assert.match((await ahead.json()).token, /^[a-f0-9]{64}$/)
+  // Beyond the tolerance in either direction is still rejected.
+  assert.equal((await request(Date.now() - (60 * 60 * 1000 + 60000))).status, 403)
+  assert.equal((await request(Date.now() + 10 * 60 * 60 * 1000)).status, 403)
 })
 
 test('real browser WebSockets proxy text and binary using private native credentials', async t => {
@@ -221,6 +284,20 @@ test('browser RPC rejects native process control over an authenticated real WebS
   const result = once(socket, 'message')
   socket.send(JSON.stringify({ id: 'rpc-1', func: 'restart', args: [] }))
   assert.match(JSON.parse(String((await result)[0])).error.message, /Unsupported/)
+  const closed = once(socket, 'close')
+  socket.close()
+  await closed
+})
+
+test('browser RPC rejects rbi* control funcs so the client cannot drive the offscreen browser directly', async t => {
+  const f = await fixture(t)
+  const socket = new WebSocket(f.origin.replace('http:', 'ws:') + '/common/s?token=' + f.token, { headers: f.headers })
+  await once(socket, 'open')
+  for (const func of ['rbiOpen', 'rbiInput', 'rbiNav', 'rbiResize', 'rbiClose']) {
+    const result = once(socket, 'message')
+    socket.send(JSON.stringify({ id: func, func, args: [{ id: 'x', url: 'https://example.org' }] }))
+    assert.match(JSON.parse(String((await result)[0])).error.message, /not a browser API/)
+  }
   const closed = once(socket, 'close')
   socket.close()
   await closed

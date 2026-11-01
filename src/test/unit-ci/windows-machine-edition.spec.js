@@ -27,6 +27,10 @@ it('generates an isolated NSIS edition with no shell registrations and the actua
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'anubis-edition-'))
   try {
     const base = require('../../build/electron-builder.json')
+    // Desktop shortcut is opt-in: the base config disables electron-builder's
+    // automatic creation while leaving the Start Menu shortcut enabled.
+    assert.equal(base.nsis.createDesktopShortcut, false)
+    assert.ok(!('createStartMenuShortcut' in base.nsis) || base.nsis.createStartMenuShortcut !== false)
     const before = JSON.stringify(base)
     const config = configureInstallerQa(base, dir)
     const configFile = path.join(dir, 'qa-builder.json')

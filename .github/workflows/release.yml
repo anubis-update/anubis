@@ -3,11 +3,17 @@ name: release
 # Manual publication creates its unused version tag only after every gate passes.
 on:
   push:
-    tags: ['v*']
+    tags:
+    - 'v*'
+    - '!v5.7.24'
   workflow_dispatch:
     inputs:
       publish:
         description: Publish this exact commit after all gates pass (creates an unused version tag)
+        type: boolean
+        default: false
+      windows_installer_only:
+        description: For v5.7.24 only, build the Windows x64 NSIS installer and skip self-hosted deployment
         type: boolean
         default: false
 
@@ -31,11 +37,23 @@ jobs:
     - uses: actions/setup-node@v4
       with:
         node-version: 24.x
+    - name: Read immutable SDK source pin
+      id: sdk
+      run: node src/build/bin/release-source-inputs.js pins
+    - name: Checkout pinned SDK source
+      env:
+        SDK_REPOSITORY: ${{ steps.sdk.outputs.sdk_repository }}
+        SDK_COMMIT: ${{ steps.sdk.outputs.sdk_commit }}
+      run: |
+        git clone --quiet --no-checkout "https://github.com/${SDK_REPOSITORY}.git" .release-inputs/sdk
+        git -C .release-inputs/sdk checkout --quiet --detach "$SDK_COMMIT"
+        test "$(git -C .release-inputs/sdk rev-parse HEAD)" = "$SDK_COMMIT"
+        test -z "$(git -C .release-inputs/sdk status --porcelain --untracked-files=no)"
     - name: Read the source version
       id: version
       run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
     - name: Require an unused version for manual publication
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+      if: ${{ github.event_name == 'workflow_dispatch' && (inputs.publish || inputs.windows_installer_only) }}
       env:
         TAG: ${{ steps.version.outputs.tag }}
       run: |
@@ -45,6 +63,20 @@ jobs:
         else
           status=$?
           if [ "$status" -ne 2 ]; then exit "$status"; fi
+        fi
+    - name: Require Windows-only mode for 5.7.24
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      env:
+        TAG: ${{ steps.version.outputs.tag }}
+        WINDOWS_INSTALLER_ONLY: ${{ inputs.windows_installer_only }}
+      run: |
+        if [ "$TAG" = "v5.7.24" ] && [ "$WINDOWS_INSTALLER_ONLY" != "true" ]; then
+          echo "::error::v5.7.24 is an installer-only release; set windows_installer_only=true"
+          exit 1
+        fi
+        if [ "$TAG" != "v5.7.24" ] && [ "$WINDOWS_INSTALLER_ONLY" = "true" ]; then
+          echo "::error::windows_installer_only is reserved for v5.7.24"
+          exit 1
         fi
     - name: Tag matches package.json version
       if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -57,6 +89,8 @@ jobs:
           exit 1
         fi
     - run: npm ci --legacy-peer-deps
+    - name: Stage pinned SDK source before unit tests
+      run: node -e "const path=require('node:path'); require('./src/build/bin/release-source-inputs').stageSdk(path.resolve('node_modules/@ai-security-tool/managed-access'), path.resolve('.release-inputs/sdk'))"
     - name: Verify unit regressions before building release artifacts
       run: node --test --test-timeout=45000 src/test/unit-ci/*.spec.js
 
@@ -72,32 +106,37 @@ jobs:
     secrets: inherit
 
   win-portable:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: check
     uses: ./.github/workflows/win-portable.yml
     secrets: inherit
 
   win-tar:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: check
     uses: ./.github/workflows/win-tar.yml
     secrets: inherit
 
   linux-deb-tar:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: check
     uses: ./.github/workflows/linux-deb-tar.yml
     secrets: inherit
 
   mac-x64:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: check
     uses: ./.github/workflows/mac.yml
     secrets: inherit
 
   mac-arm:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: check
     uses: ./.github/workflows/mac-arm.yml
     secrets: inherit
 
   release:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    if: ${{ always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && needs.check.result == 'success' && needs.protocols-and-source.result == 'success' && needs.win-nsis.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) || (needs.win-portable.result == 'success' && needs.win-tar.result == 'success' && needs.linux-deb-tar.result == 'success' && needs.mac-x64.result == 'success' && needs.mac-arm.result == 'success')) }}
     needs: [check, protocols-and-source, win-nsis, win-portable, win-tar, linux-deb-tar, mac-x64, mac-arm]
     runs-on: ubuntu-24.04
     permissions:
@@ -116,14 +155,26 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ needs.check.outputs.tag }}
         TARGET_SHA: ${{ github.sha }}
+        WINDOWS_INSTALLER_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_installer_only }}
       run: |
-        node services/prepare-release.js out release-assets "${TAG#v}"
+        if [ "$WINDOWS_INSTALLER_ONLY" = "true" ]; then
+          node services/prepare-release.js out release-assets "${TAG#v}" --windows-installer-only
+        else
+          node services/prepare-release.js out release-assets "${TAG#v}"
+        fi
         pre=""
         case "$TAG" in *-*) pre="--prerelease" ;; esac
         if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
           echo "::error::Release $TAG already exists; do not replace published binaries"; exit 1
         else
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
+              echo "::error::Tag $TAG appeared after preflight; refusing to create the release"
+              exit 1
+            else
+              status=$?
+              if [ "$status" -ne 2 ]; then exit "$status"; fi
+            fi
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="refs/tags/$TAG" -f sha="$TARGET_SHA" >/dev/null
           fi
@@ -132,7 +183,7 @@ jobs:
         fi
 
   publish-self-hosted:
-    if: ${{ vars.ANUBIS_AUTO_SELF_HOSTED_PUBLISH == 'true' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+    if: ${{ vars.ANUBIS_AUTO_SELF_HOSTED_PUBLISH == 'true' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_name != 'v5.7.24' && !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: release
     permissions:
       contents: read

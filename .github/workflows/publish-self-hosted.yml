@@ -55,6 +55,7 @@ jobs:
       run: |
         set -euo pipefail
         [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Stable release tag required"; exit 1; }
+        [[ "$TAG" != "v5.7.24" ]] || { echo "::error::v5.7.24 is installer-only and must not deploy the update feed"; exit 1; }
         for name in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_UPDATE_PATH DEPLOY_STATE_PATH DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
           test -n "${!name}" || { echo "::error::Missing $name"; exit 1; }
         done

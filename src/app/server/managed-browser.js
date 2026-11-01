@@ -5,6 +5,9 @@ const WebSocket = require('ws')
 
 const HEADER = 'x-anubis-managed-transport'
 const SESSION_TTL = 8 * 60 * 60 * 1000
+// Tolerance for clock drift between the gateway (which stamps expiresAt) and
+// this device, so a modest skew in either direction does not reject a token.
+const CLOCK_SKEW = 60 * 60 * 1000
 
 function resolveBrowserAssets () {
   const bundled = path.resolve(__dirname, '../browser-assets')
@@ -50,7 +53,7 @@ function initManagedBrowser (app, {
     : require('@ai-security-tool/anubis-browser-assets/package.json').version
   const issue = (unlocked) => {
     for (const [id, session] of sessions) {
-      if (session.expires <= now()) sessions.delete(id)
+      if (session.expires <= now() - CLOCK_SKEW) sessions.delete(id)
     }
     if (sessions.size >= 128) throw new Error('Too many managed browser sessions')
     const token = crypto.randomBytes(32).toString('hex')
@@ -60,7 +63,7 @@ function initManagedBrowser (app, {
   const sessionFor = req => {
     const token = req.headers.token || req.query.token
     const session = sessions.get(token)
-    return session && session.expires > now() && session.unlocked ? session : null
+    return session && session.expires > now() - CLOCK_SKEW && session.unlocked ? session : null
   }
   app.use(async (req, res, next) => {
     const provided = req.headers[HEADER]
@@ -86,11 +89,11 @@ function initManagedBrowser (app, {
         if (!value || Object.keys(value).sort().join(',') !== 'bindingId,expiresAt,role' ||
             value.role !== 'administrator' || !/^[a-f0-9]{64}$/.test(value.bindingId) ||
             value.bindingId !== req.headers['x-anubis-managed-session'] ||
-            !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= now() || value.expiresAt > now() + SESSION_TTL) {
+            !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= now() - CLOCK_SKEW || value.expiresAt > now() + SESSION_TTL + CLOCK_SKEW) {
           return res.status(403).json({ error: 'Invalid managed administrator authorization' })
         }
         const ok = await rpc('browserRoleLogin', ['administrator'])
-        if (!ok || generation !== authGeneration || value.expiresAt <= now()) return res.status(401).json({ error: 'Desktop authentication required' })
+        if (!ok || generation !== authGeneration || value.expiresAt <= now() - CLOCK_SKEW) return res.status(401).json({ error: 'Desktop authentication required' })
         const token = issue(true)
         sessions.get(token).expires = value.expiresAt
         return res.json({ token, bindingId: value.bindingId, role: 'administrator', expiresAt: value.expiresAt })
@@ -101,6 +104,17 @@ function initManagedBrowser (app, {
         const ok = await rpc('browserUserLogin', [req.body?.password])
         if (!ok || generation !== authGeneration) return res.status(401).json({ error: 'Invalid Web user password' })
         return res.json(issue(true))
+      }
+      if (req.method === 'POST' && pathname === '/api/managed-set-web-password') {
+        const value = req.body
+        if (!value || Object.keys(value).sort().join(',') !== 'password' || typeof value.password !== 'string') {
+          return res.status(400).json({ error: 'Invalid managed Web password update' })
+        }
+        await rpc('setManagedWebPassword', [value.password])
+        authGeneration++
+        for (const session of sessions.values()) session.unlocked = false
+        sessions.clear()
+        return res.json({ ok: true })
       }
       if (req.method === 'GET' && ['/', '/index.html'].includes(pathname)) {
         const info = await rpc('browserInfo')
@@ -167,11 +181,16 @@ function initManagedBrowser (app, {
         req.managedSession = session
         req.managedRpc = (func, args) => {
           if (!session.unlocked) throw new Error('Desktop authentication required')
-          if (['managedMcpEndpoint', 'browserInfo', 'browserLogin', 'browserUserLogin', 'browserRoleLogin'].includes(func)) {
+          if (['managedMcpEndpoint', 'browserInfo', 'browserLogin', 'browserUserLogin', 'browserRoleLogin', 'setManagedWebPassword',
+            'rbiOpen', 'rbiInput', 'rbiNav', 'rbiResize', 'rbiClose', 'rbiExportCookies', 'rbiImportCookies'].includes(func)) {
             throw new Error('Internal managed function is not a browser API')
           }
           return rpc(func, args)
         }
+        return next()
+      }
+      if (/^\/browser\/[^/]+(?:\/\.websocket)?$/.test(pathname)) {
+        req.managedSession = session
         return next()
       }
       if (/^\/(?:terminals|sftp|transfer|vnc|rdp|spice)\/[^/]+(?:\/[^/]+)?(?:\/\.websocket)?$/.test(pathname)) {

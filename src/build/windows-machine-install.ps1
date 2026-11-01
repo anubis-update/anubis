@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious')]
+  [ValidateSet('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start')]
   [string] $Action,
   [string] $InstallDir,
   [string] $SidListFile,
@@ -217,6 +217,146 @@ function Assert-NativePackage {
   if ($valid.valid -ne $true) { throw 'Native package validation failed' }
 }
 
+function Get-ServiceRecord {
+  $rows = @(Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName.Replace("'", "''") + "'"))
+  if ($rows.Count -gt 1) { throw "Duplicate SCM records for $ServiceName" }
+  if ($rows.Count -eq 0) { return $null }
+  return $rows[0]
+}
+
+function Get-ExpectedServiceImagePath {
+  return '"' + (Join-Path $InstallDir 'anubis-host.exe') + '" service --name ' + $ServiceName
+}
+
+# Deletes a stale canonical service before the package files exist on disk, so
+# the installed native host cannot perform the delete. Uses the Win32 SCM
+# DeleteService directly (Remove-Service is PowerShell 7+ only; the installer
+# runs Windows PowerShell 5.1) and avoids spawning the sc command-line tool.
+function Register-ServiceControlType {
+  if ('AnubisInstaller.ServiceControl' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace AnubisInstaller {
+  public static class ServiceControl {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenSCManagerW(string machine, string database, uint access);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenServiceW(IntPtr scm, string name, uint access);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool DeleteService(IntPtr service);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool ChangeServiceConfig2W(IntPtr service, uint infoLevel, IntPtr info);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CloseServiceHandle(IntPtr handle);
+    const uint SC_MANAGER_CONNECT = 0x0001;
+    const uint DELETE = 0x00010000;
+    const uint SERVICE_CHANGE_CONFIG = 0x0002;
+    const uint SERVICE_CONFIG_FAILURE_ACTIONS = 2;
+    const uint SERVICE_CONFIG_FAILURE_ACTIONS_FLAG = 4;
+    [StructLayout(LayoutKind.Sequential)]
+    struct FailureActionsFlag { public int fFailureActionsOnNonCrashFailures; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct FailureActions {
+      public uint dwResetPeriod;
+      public string lpRebootMsg;
+      public string lpCommand;
+      public uint cActions;
+      public IntPtr lpsaActions;
+    }
+    public static void DeleteByName(string name) {
+      IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+      if (scm == IntPtr.Zero) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+      try {
+        IntPtr svc = OpenServiceW(scm, name, DELETE);
+        if (svc == IntPtr.Zero) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        try {
+          if (!DeleteService(svc)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        } finally { CloseServiceHandle(svc); }
+      } finally { CloseServiceHandle(scm); }
+    }
+    // Version-independent disarm: clears the non-crash-failure flag and deletes
+    // the restart actions directly through the SCM, so it never depends on the
+    // on-disk host binary (which, before file copy, is still the pre-upgrade
+    // build that does not understand the native disarm command).
+    public static void DisableRecovery(string name) {
+      IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+      if (scm == IntPtr.Zero) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+      try {
+        IntPtr svc = OpenServiceW(scm, name, SERVICE_CHANGE_CONFIG);
+        if (svc == IntPtr.Zero) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        try {
+          FailureActionsFlag flag = new FailureActionsFlag();
+          flag.fFailureActionsOnNonCrashFailures = 0;
+          IntPtr pFlag = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(FailureActionsFlag)));
+          try {
+            Marshal.StructureToPtr(flag, pFlag, false);
+            if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, pFlag)) {
+              throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+          } finally { Marshal.FreeHGlobal(pFlag); }
+          // A valid (non-null) action pointer with cActions == 0 deletes all
+          // failure actions; a null pointer would leave them unchanged.
+          IntPtr emptyActions = Marshal.AllocHGlobal(8);
+          IntPtr pActions = IntPtr.Zero;
+          try {
+            FailureActions fa = new FailureActions();
+            fa.dwResetPeriod = 0;
+            fa.lpRebootMsg = "";
+            fa.lpCommand = "";
+            fa.cActions = 0;
+            fa.lpsaActions = emptyActions;
+            pActions = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(FailureActions)));
+            Marshal.StructureToPtr(fa, pActions, false);
+            if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, pActions)) {
+              throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+          } finally {
+            if (pActions != IntPtr.Zero) {
+              Marshal.DestroyStructure(pActions, typeof(FailureActions));
+              Marshal.FreeHGlobal(pActions);
+            }
+            Marshal.FreeHGlobal(emptyActions);
+          }
+        } finally { CloseServiceHandle(svc); }
+      } finally { CloseServiceHandle(scm); }
+    }
+  }
+}
+'@
+}
+
+function Remove-StaleServiceViaScm([string] $Name) {
+  Register-ServiceControlType
+  [AnubisInstaller.ServiceControl]::DeleteByName($Name)
+}
+
+function Disable-ServiceRecoveryViaScm([string] $Name) {
+  Register-ServiceControlType
+  [AnubisInstaller.ServiceControl]::DisableRecovery($Name)
+}
+
+function Repair-StaleCanonicalService {
+  $record = Get-ServiceRecord
+  if ($null -eq $record) { return $false }
+  if ($record.PathName -cne (Get-ExpectedServiceImagePath) -or
+      $record.StartName -notin @('LocalSystem', '') -or
+      $record.StartMode -cne 'Auto') {
+    return $false
+  }
+  if ($record.State -ne 'Stopped') {
+    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+  }
+  Remove-StaleServiceViaScm $ServiceName
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  while ($null -ne (Get-ServiceRecord)) {
+    if ([DateTime]::UtcNow -ge $deadline) { throw "Timed out waiting for stale $ServiceName removal" }
+    Start-Sleep -Milliseconds 500
+  }
+  return $true
+}
+
 function Get-OwnedService {
   $services = @(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)
   if ($services.Count -eq 0) {
@@ -377,6 +517,54 @@ function Uninstall-PreviousMachinePackage {
   }
 }
 
+function Select-CanonicalAccountSids([string[]] $Candidates) {
+  $seen = New-Object System.Collections.Generic.List[string]
+  foreach ($candidate in @($Candidates)) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    $sid = $candidate.Trim()
+    if ($sid -notmatch '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+$') { continue }
+    try {
+      if ((New-Object Security.Principal.SecurityIdentifier($sid)).Value -cne $sid) { continue }
+    } catch { continue }
+    if (-not $seen.Contains($sid)) { $seen.Add($sid) }
+  }
+  return [string[]]@($seen | Sort-Object)
+}
+
+# Enumerates the SIDs of currently logged-on interactive operators (local or RDP)
+# so a silent install can authorize them without a manual /ALLOWUSERSIDS list.
+# Runs as the elevated admin installer (no SeTcbPrivilege), hence CIM rather than
+# the SYSTEM-only WTS token path the running host uses.
+function Get-InteractiveUserSids {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  try {
+    $interactive = @{}
+    foreach ($session in @(Get-CimInstance Win32_LogonSession -ErrorAction Stop)) {
+      if ($session.LogonType -in @(2, 10, 11)) { $interactive[[string]$session.LogonId] = $true }
+    }
+    foreach ($assoc in @(Get-CimInstance Win32_LoggedOnUser -ErrorAction Stop)) {
+      if (-not $interactive.ContainsKey([string]$assoc.Dependent.LogonId)) { continue }
+      $name = $assoc.Antecedent.Name
+      $domain = $assoc.Antecedent.Domain
+      if ([string]::IsNullOrEmpty($name)) { continue }
+      $account = if ([string]::IsNullOrEmpty($domain)) { $name } else { "$domain\$name" }
+      try {
+        $candidates.Add((New-Object Security.Principal.NTAccount($account)).Translate([Security.Principal.SecurityIdentifier]).Value)
+      } catch { }
+    }
+  } catch { }
+  return Select-CanonicalAccountSids $candidates.ToArray()
+}
+
+function Test-RetainedAllowListEmpty {
+  $root = Get-NativeProgramData
+  foreach ($leaf in @('Anubis', 'Host', $ServiceName)) { $root = Join-Path $root $leaf }
+  $configFile = Join-Path $root 'host.json'
+  if (-not (Test-Path -LiteralPath $configFile)) { return $true }
+  $hostConfig = [IO.File]::ReadAllText($configFile) | ConvertFrom-Json
+  return ($null -eq $hostConfig.allowedUserSids -or @($hostConfig.allowedUserSids).Count -eq 0)
+}
+
 function Invoke-MachineInstall {
   if (-not [Environment]::Is64BitOperatingSystem) { throw 'Machine service requires Windows x64' }
   if (-not [Environment]::Is64BitProcess) { throw 'Machine installation requires native x64 PowerShell' }
@@ -385,12 +573,20 @@ function Invoke-MachineInstall {
     throw 'An elevated administrator is required'
   }
   $AllowedUserSids = Read-AllowedUserSids $SidListFile
+  # Production default: with no explicit /ALLOWUSERSIDS, authorize the logged-on
+  # interactive operator(s) so Chrome/Edge user contexts are reachable without a
+  # manual allow-list. Only an empty/absent retained list is ever derived onto;
+  # explicit SIDs stay authoritative and QA editions stay empty.
+  if ($AllowedUserSids -eq '' -and -not $CompiledEdition.disableManaged -and (Test-RetainedAllowListEmpty)) {
+    $derived = @(Get-InteractiveUserSids)
+    if ($derived.Count -gt 0) { $AllowedUserSids = ($derived -join ',') }
+  }
   Assert-Destination $InstallDir -AllowInstallerFiles:($Action -eq 'Finish')
   $marker = Join-Path $InstallDir 'anubis-machine-install.json'
   switch ($Action) {
     'Prepare' {
       Invoke-UserMigration ($MigrationRequested -eq '1') $false
-      if ($AllowedUserSids -ne '' -and $null -ne (Get-OwnedService)) {
+      if ($AllowedUserSids -ne '' -and $null -ne (Get-OwnedService) -and -not (Test-RetainedAllowListEmpty)) {
         throw 'The retained service allow-list cannot be changed by an update'
       }
       if (Test-Path -LiteralPath $InstallDir) {
@@ -400,8 +596,9 @@ function Invoke-MachineInstall {
         }
         Stop-OwnedService
       } else {
-        if (@(Get-Service -ErrorAction Stop | Where-Object { $_.ServiceName -eq $ServiceName }).Count -gt 0) {
-          throw "$ServiceName exists outside this package; refusing to change it"
+        if (-not (Repair-StaleCanonicalService) -and
+            @(Get-Service -ErrorAction Stop | Where-Object { $_.ServiceName -eq $ServiceName }).Count -gt 0) {
+          throw "$ServiceName exists outside this package and could not be safely repaired; refusing to change it"
         }
         # Supply ownership/DACL at creation, not after a user-owned staging gap.
         $null = [IO.Directory]::CreateDirectory($InstallDir, (New-PackageAcl $true))
@@ -411,7 +608,10 @@ function Invoke-MachineInstall {
         }
       }
     }
-    'Stop' { Stop-OwnedService }
+    'Stop' {
+      Stop-OwnedService
+      if ($null -ne (Get-OwnedService)) { Disable-ServiceRecoveryViaScm $ServiceName }
+    }
     'UninstallPrevious' { Uninstall-PreviousMachinePackage }
     'Finish' {
       Protect-Package $InstallDir
@@ -423,7 +623,16 @@ function Invoke-MachineInstall {
         $installed = Invoke-Host $arguments -Json
         if ($installed.installed -ne $true) { throw 'Service installation was not confirmed' }
       } elseif ($AllowedUserSids -ne '') {
-        throw 'The retained service allow-list cannot be changed by an update'
+        if (Test-RetainedAllowListEmpty) {
+          # One-time migration: an empty retained allow-list adopts the operator
+          # SIDs by recreating the already-stopped service. A populated list is
+          # never silently changed (matched by the native host guard too).
+          Invoke-Host @('uninstall', '--name', $ServiceName)
+          $installed = Invoke-Host @('install', '--name', $ServiceName, '--install-dir', $InstallDir, '--allow-user-sids', $AllowedUserSids) -Json
+          if ($installed.installed -ne $true) { throw 'Service allow-list migration was not confirmed' }
+        } else {
+          throw 'The retained service allow-list cannot be changed by an update'
+        }
       }
       # This installer-only marker is never emitted into portable/AppX payloads.
       $markerJson = @{ version = 1; serviceName = $ServiceName } | ConvertTo-Json -Compress
@@ -432,6 +641,7 @@ function Invoke-MachineInstall {
       Assert-NativePackage
       Protect-QaMachinePolicy
       $status = Get-OwnedService
+      Invoke-Host @('arm', '--name', $ServiceName)
       if ($status.scm.State -eq 1) { Invoke-Host @('start', '--name', $ServiceName) }
       Wait-ServiceState 4
       $identity = Invoke-Host @('broker-client', '--name', $ServiceName, '--operation', 'identity') -Json
@@ -458,6 +668,29 @@ function Invoke-MachineInstall {
 }
 
 if (-not $DefinitionsOnly) {
+  if ($Action -eq 'Start') {
+    # Fail-safe recovery invoked only from the installer's abort path. It never
+    # blocks that abort or validates package state: it only brings the already
+    # registered owned service back so a failed setup can't leave the machine
+    # without a running host. Always exits 0.
+    try {
+      $status = Get-OwnedService
+      if ($null -ne $status) {
+        try { Invoke-Host @('arm', '--name', $ServiceName) } catch { }
+        if ($status.scm.State -ne 4) { try { Invoke-Host @('start', '--name', $ServiceName) } catch { } }
+        try { Wait-ServiceState 4 } catch { }
+      }
+    } catch {
+      # The on-disk package may be mid-replacement; fall back to a raw SCM start
+      # so the service still returns without the native broker.
+      try {
+        if (@(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue).Count -ne 0) {
+          Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        }
+      } catch { }
+    }
+    exit 0
+  }
   try {
     Invoke-MachineInstall
     Write-Output "Machine installer action $Action completed."

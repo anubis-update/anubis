@@ -54,6 +54,7 @@ test('pending PowerShell/UAC cannot complete the update; cancellation propagates
   const launch = launcherWithExec((command, args, options, callback) => {
     assert.equal(command, 'powershell.exe')
     assert.match(args.at(-1), /Start-Process.*-PassThru.*-ErrorAction Stop/)
+    assert.match(args.at(-1), /Start-Process[\s\S]*-ArgumentList '--silent'[\s\S]*-PassThru/)
     assert.match(args.at(-1), /catch[\s\S]*exit 1/)
     assert.equal(options.timeout, 120000)
     complete = callback

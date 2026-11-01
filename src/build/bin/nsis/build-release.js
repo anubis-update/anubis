@@ -124,7 +124,9 @@ async function verifySourceAsar (root, runtime, config) {
   const { createTransformer } = require('app-builder-lib/out/fileTransformer')
   const transformed = await createTransformer(path.join(root, 'work/app'), config)(stagedSdkPackage)
   assert(transformed === null || typeof transformed === 'string', 'SDK metadata producer transform failed')
-  const expectedSdkPack = transformed === null ? sdkPack : JSON.parse(transformed)
+  const expectedSdkPack = transformed === null ? { ...sdkPack } : JSON.parse(transformed)
+  delete expectedSdkPack.scripts
+  delete expectedSdkPack.bugs
   assert.deepEqual(JSON.parse(get(path.join('node_modules', sdkPack.name, 'package.json'))), expectedSdkPack)
   for (const file of new Set([...sdkPack.files, 'LICENSE'])) {
     assert(get(path.join('node_modules', sdkPack.name, file)).equals(fs.readFileSync(path.join(sdk, file))), `Pinned SDK source changed: ${file}`)

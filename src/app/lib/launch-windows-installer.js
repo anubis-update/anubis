@@ -5,7 +5,7 @@ module.exports = function launchWindowsInstaller (file) {
 $ErrorActionPreference = 'Stop'
 try {
   $path = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:ANUBIS_INSTALLER_PATH_B64))
-  $installer = Start-Process -FilePath $path -PassThru -ErrorAction Stop
+  $installer = Start-Process -FilePath $path -ArgumentList '--silent' -PassThru -ErrorAction Stop
   if ($null -eq $installer) { throw 'Installer process was not created' }
   [Console]::Out.WriteLine($installer.Id)
   exit 0

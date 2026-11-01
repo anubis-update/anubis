@@ -6,6 +6,7 @@ const {
   ipcMain,
   app,
   BrowserWindow,
+  session,
   dialog,
   powerMonitor,
   globalShortcut,
@@ -175,6 +176,10 @@ async function initAppServer () {
           if (m.func === 'managedMcpEndpoint') {
             return require('../widgets/load-widget').getManagedMcpEndpoint()
           }
+          const browserRouter = globalState.get('browserEngineRouter')
+          if (browserRouter && browserRouter.handles(m.func)) {
+            return browserRouter.dispatch(m.func, m.args)
+          }
           if (!dispatch) throw new Error('Managed desktop dispatcher is not ready')
           return dispatch(m.func, m.args)
         }).then(
@@ -195,9 +200,92 @@ async function initAppServer () {
         }
       }
     })
+    initRbiBrowser(child)
+    initCdpBrowser(child)
+    globalState.set('browserEngineRouter', require('./rbi-rpc-router').createRbiRpcRouter({
+      getRbiBrowser: () => globalState.get('rbiBrowser'),
+      getCdpBrowser: () => globalState.get('cdpBrowser'),
+      isSystemRuntime: () => globalState.get('machineRuntimeRole') === 'system'
+    }))
     globalState.set('serverInited', true)
   }
   globalState.set('config', config)
+}
+
+// Remote browser isolation host. The hardened offscreen Chromium renderers can
+// only run here in main; the server child terminates the `/browser/:id` socket
+// and bridges to this manager. Screencast frames are pushed to the child as
+// base64; control arrives as server-named `rbi*` RPC calls.
+function initRbiBrowser (child) {
+  // Derive a realistic Chrome UA from the bundled Chromium so the offscreen
+  // renderer no longer advertises Electron/anubis. The major version tracks the
+  // real engine; the fallback keeps a plausible value if it is unavailable.
+  const chromeMajor = String(process.versions.chrome || '').split('.')[0] || '131'
+  const defaultUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`
+  const rbi = require('./rbi-browser').createRbiBrowser({
+    session,
+    BrowserWindow,
+    defaultUserAgent,
+    isWebsiteUrl: require('./embedded-website').isWebsiteUrl,
+    onFrame: (id, data) => {
+      if (child.connected) child.send({ type: 'rbi-frame', id, data: data.toString('base64') })
+    },
+    onEvent: (id, event) => { if (child.connected) child.send({ type: 'rbi-event', id, event }) },
+    log
+  })
+  globalState.set('rbiBrowser', rbi)
+  child.once('disconnect', () => rbi.disposeAll())
+}
+
+// CDP engine counterpart to the RBI host: drives the user's real local
+// Chrome/Edge over the DevTools Protocol. It emits the SAME `rbi-frame`/
+// `rbi-event` child messages as initRbiBrowser so the frame/event wire format
+// and the client path are unchanged; only the engine behind an id differs.
+//
+// The live cross-session hosting (running this in the logged-on user's context
+// so it reaches the user's real profile) is proven later on canary and is NOT
+// wired here; this constructs the engine with the injectable launcher/client so
+// the routing slice is complete and testable.
+function initCdpBrowser (child) {
+  const { createCdpLaunch, createPipeTransport, createWsTransport, readDevToolsPort, copyProfileTolerant } = require('./cdp-launch')
+  const chromeMajor = String(process.versions.chrome || '').split('.')[0] || '131'
+  const defaultUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeMajor}.0.0.0 Safari/537.36`
+  const { spawn } = require('node:child_process')
+  const nodeFs = require('node:fs')
+  const nodePath = require('node:path')
+  const { launcher, cdpClient } = createCdpLaunch({
+    spawn,
+    fsExists: (p) => nodeFs.existsSync(p),
+    copyProfile: (src, dst) => copyProfileTolerant(src, dst),
+    resolveUserDataDir: (browser) => nodePath.join(app.getPath('userData'), 'cdp-profiles', browser),
+    connectPipe: async (proc) => createPipeTransport(proc),
+    connectPort: async (endpoint) => {
+      const WebSocket = require('ws')
+      const ws = new WebSocket(endpoint)
+      await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+      return createWsTransport(ws)
+    },
+    readDevToolsEndpoint: async (userDataDir) => {
+      const port = readDevToolsPort(userDataDir)
+      const res = await fetch(`http://127.0.0.1:${port}/json/version`)
+      const info = await res.json()
+      return info.webSocketDebuggerUrl
+    },
+    log
+  })
+  const cdp = require('./cdp-browser').createCdpBrowser({
+    launcher,
+    cdpClient,
+    defaultUserAgent,
+    isWebsiteUrl: require('./embedded-website').isWebsiteUrl,
+    onFrame: (id, data) => {
+      if (child.connected) child.send({ type: 'rbi-frame', id, data: data.toString('base64') })
+    },
+    onEvent: (id, event) => { if (child.connected) child.send({ type: 'rbi-event', id, event }) },
+    log
+  })
+  globalState.set('cdpBrowser', cdp)
+  child.once('disconnect', () => cdp.disposeAll())
 }
 
 function initIpc () {
@@ -259,6 +347,10 @@ function initIpc () {
   })
   const asyncGlobals = {
     getManagedConnectivity: () => globalState.get('managedConnectivity') || { status: 'offline' },
+    activateBrowser: (key) => {
+      const fn = globalState.get('managedActivate')
+      return fn ? fn(key) : { ok: false, error: 'offline' }
+    },
     confirmExit: () => {
       globalState.set('confirmExit', true)
     },

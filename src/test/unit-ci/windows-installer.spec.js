@@ -19,7 +19,7 @@ describe('Windows installer contract', () => {
   it('elevates only the installer, before process creation completes', () => {
     assert.equal(config.win.requestedExecutionLevel, 'asInvoker')
     assert.equal(config.nsis.include, 'src/build/windows-installer.nsh')
-    assert.match(include, /!macro customHeader[\s\S]*?!ifndef BUILD_UNINSTALLER\s+RequestExecutionLevel admin\s+SilentInstall silent/)
+    assert.match(include, /!macro customHeader[\s\S]*?!ifndef BUILD_UNINSTALLER\s+RequestExecutionLevel admin\s+SilentInstall normal/)
     assert.match(include, /!ifdef BUILD_UNINSTALLER\s+RequestExecutionLevel admin/)
     assert.doesNotMatch(include, /UAC_RunElevated|ExecShell.*runas/i)
   })
@@ -54,6 +54,48 @@ describe('Windows installer contract', () => {
     for (const line of include.split(/\r?\n/).filter(line => /^\s*MessageBox\b/.test(line))) {
       assert.match(line, /\/SD IDOK$/, 'Silent errors must not block on a dialog: ' + line)
     }
+  })
+
+  it('defaults to a visible install and flips to silent only on the --silent flag', () => {
+    // Fleet auto-update + canary drive the installer with `--silent`; the GUI
+    // default must stay visible (`normal`) and switch to silent solely via that
+    // flag in preInit. This is the fleet-critical path the poller depends on.
+    assert.match(include, /!macro preInit\s+SetSilent normal/)
+    assert.match(
+      include,
+      /\$\{GetOptions\} \$R0 "--silent" \$R1\s+\$\{IfNot\} \$\{Errors\}\s+SetSilent silent\s+\$\{EndIf\}/
+    )
+    // The default `normal` must precede the conditional `silent` flip.
+    assert.ok(include.indexOf('SetSilent normal') < include.indexOf('SetSilent silent'))
+  })
+
+  it('creates the desktop shortcut only on an interactive opt-in, never silently or on update', () => {
+    // electron-builder must never auto-create the desktop shortcut; the Start
+    // Menu shortcut stays enabled (createStartMenuShortcut is left at default).
+    assert.equal(config.nsis.createDesktopShortcut, false)
+    assert.ok(!('createStartMenuShortcut' in config.nsis) || config.nsis.createStartMenuShortcut !== false)
+    // The opt-in checkbox defaults to unchecked and only an interactive assisted
+    // page can flip it; the page is skipped for silent installs. The update guard
+    // lives in customInstall (the ${isUpdated} macro needs the StdUtils plugin,
+    // which is unavailable where the page function is included).
+    assert.match(include, /StrCpy \$AnubisDesktopShortcut 0/)
+    assert.match(
+      include,
+      /!macro customPageAfterChangeDir\s+Page custom AnubisShortcutPageCreate AnubisShortcutPageLeave\s+!macroend/
+    )
+    assert.match(
+      include,
+      /Function AnubisShortcutPageCreate[\s\S]*?\$\{If\} \$\{Silent\}\s+Abort\s+\$\{EndIf\}/
+    )
+    assert.match(include, /\$\{NSD_CreateCheckbox\} 0 20u 100% 12u "Create a desktop shortcut"/)
+    assert.match(include, /Function AnubisShortcutPageLeave\s+\$\{NSD_GetState\} \$AnubisDesktopCheckbox \$AnubisDesktopShortcut/)
+    // The shortcut is written only when not silent, not an update, and ticked.
+    assert.match(
+      include,
+      /\$\{IfNot\} \$\{Silent\}\s+\$\{IfNot\} \$\{isUpdated\}\s+\$\{If\} \$AnubisDesktopShortcut == 1\s+CreateShortCut "\$DESKTOP\\\$\{PRODUCT_NAME\}\.lnk" "\$INSTDIR\\\$\{APP_EXECUTABLE_FILENAME\}"/
+    )
+    // The uninstaller removes the shortcut on a real uninstall (not on update).
+    assert.match(include, /!insertmacro AnubisMachineAction Remove\s+Delete "\$DESKTOP\\\$\{PRODUCT_NAME\}\.lnk"/)
   })
 
   it('invokes native x64 PowerShell from both 32-bit NSIS deployment paths', () => {
@@ -93,5 +135,63 @@ describe('Windows installer contract', () => {
     assert.match(include, /Sleep 500/)
     assert.match(include, /SetErrorLevel 1618/)
     assert.doesNotMatch(include, /_KillProcess|_CloseProcess|taskkill|Stop-Process|KILL_PROCESS/i)
+  })
+
+  it('never leaves the machine host stopped when setup aborts after taking it down', () => {
+    const script = fs.readFileSync(path.resolve(__dirname, '../../build/windows-machine-install.ps1'), 'utf8')
+    // The abort handler must restore the owned service, but only once and only
+    // when a Prepare/Stop already took it down, before quitting.
+    assert.match(
+      include,
+      /Function AnubisFail\s+;[\s\S]*?\$\{If\} \$AnubisServiceStopped == 1\s+StrCpy \$AnubisServiceStopped 0\s+!insertmacro AnubisMachineAction Start\s+\$\{EndIf\}/
+    )
+    // The down-state flag is armed right after each service stop.
+    assert.match(include, /!insertmacro AnubisMachineAction Prepare\s+StrCpy \$AnubisServiceStopped 1/)
+    assert.match(include, /!else\s+StrCpy \$AnubisServiceStopped 1\s+StrCpy \$AnubisMessage "Waiting up to 60 seconds/)
+    assert.match(include, /StrCpy \$AnubisServiceStopped 0\s+\$\{GetParameters\}/)
+    // The recovery action is best-effort: it never validates package state and
+    // always exits 0, so it can never re-enter the abort path.
+    assert.match(script, /\[ValidateSet\('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start'\)\]/)
+    assert.match(script, /if \(\$Action -eq 'Start'\) \{[\s\S]*?Invoke-Host @\('arm', '--name', \$ServiceName\)[\s\S]*?Start-Service -Name \$ServiceName -ErrorAction SilentlyContinue[\s\S]*?exit 0/)
+  })
+
+  it('derives interactive operator SIDs only for production, empty, retained lists', () => {
+    const script = fs.readFileSync(path.resolve(__dirname, '../../build/windows-machine-install.ps1'), 'utf8')
+    // Default derivation is gated: no explicit list, production edition, and an
+    // empty/absent retained list. Explicit /ALLOWUSERSIDS stays authoritative.
+    assert.match(script, /\$AllowedUserSids -eq '' -and -not \$CompiledEdition\.disableManaged -and \(Test-RetainedAllowListEmpty\)/)
+    assert.match(script, /\$derived = @\(Get-InteractiveUserSids\)/)
+    // Interactive enumeration keeps only canonical account SIDs (type 2/10/11).
+    assert.match(script, /LogonType -in @\(2, 10, 11\)/)
+    assert.match(script, /\^S-1-5-21-\[0-9\]\+-\[0-9\]\+-\[0-9\]\+-\[0-9\]\+\$/)
+    // One-time empty-list migration recreates the stopped service; a populated
+    // retained list is still refused.
+    assert.match(script, /if \(Test-RetainedAllowListEmpty\) \{[\s\S]*?Invoke-Host @\('uninstall', '--name', \$ServiceName\)[\s\S]*?--allow-user-sids/)
+    assert.match(script, /The retained service allow-list cannot be changed by an update/)
+  })
+
+  it('filters, dedups and sorts candidate account SIDs canonically', {
+    skip: process.platform !== 'win32',
+    timeout: 30000
+  }, () => {
+    const systemRoot = process.env.SystemRoot
+    const quote = value => "'" + value.replace(/'/g, "''") + "'"
+    const encode = value => Buffer.from(value, 'utf16le').toString('base64')
+    const script = path.resolve(__dirname, '../../build/windows-machine-install.ps1')
+    const candidates = [
+      'S-1-5-21-9-9-9-1001', 'S-1-5-18', 'S-1-5-21-1-2-3-500',
+      's-1-5-21-1-2-3-500', 'S-1-5-21-1-2-3-500', 'garbage', ''
+    ]
+    const list = candidates.map(quote).join(',')
+    const probe = `$ProgressPreference='SilentlyContinue'; . ${quote(script)} -DefinitionsOnly; [string]::Join(',', (Select-CanonicalAccountSids @(${list})))`
+    const nativePowerShell = path.join(systemRoot, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const runner = fs.existsSync(nativePowerShell)
+      ? nativePowerShell
+      : path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const result = spawnSync(runner, [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encode(probe)
+    ], { encoding: 'utf8', timeout: 25000, windowsHide: true })
+    assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`)
+    assert.equal(result.stdout.trim(), 'S-1-5-21-1-2-3-500,S-1-5-21-9-9-9-1001')
   })
 })

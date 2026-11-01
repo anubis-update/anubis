@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "resource": {
     "repository": "Anubis-Security-Tool/anubis-resource",
-    "commit": "18da0874b952a3e7e4908b9cc02a548ac178efaa"
+    "commit": "48cdfdbe29663e1bb88d01e739c562540300bb2f"
   },
   "web": {
     "repository": "Anubis-Security-Tool/anubis-web",
@@ -10,6 +10,6 @@
   },
   "sdk": {
     "repository": "Anubis-Security-Tool/anubis-managed-access",
-    "commit": "bff4b1d4d549cfcca288c0d687b9b8f420a5be19"
+    "commit": "faa5a58e2ea4491d3a1cb988185a70a7839c7abc"
   }
 }
