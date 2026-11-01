@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      windows_installer_only:
+        description: 'Allow installer-only feed promotion for v5.7.24 after explicit authorization'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -36,6 +41,7 @@ jobs:
     env:
       TAG: ${{ inputs.tag }}
       WINDOWS_MACHINE_HOST: ${{ inputs.windows_machine_host }}
+      WINDOWS_INSTALLER_ONLY: ${{ inputs.windows_installer_only }}
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -55,7 +61,17 @@ jobs:
       run: |
         set -euo pipefail
         [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Stable release tag required"; exit 1; }
-        [[ "$TAG" != "v5.7.24" ]] || { echo "::error::v5.7.24 is installer-only and must not deploy the update feed"; exit 1; }
+        if [[ "$TAG" == "v5.7.24" ]]; then
+          [[ "$WINDOWS_INSTALLER_ONLY" == "true" && "$WINDOWS_MACHINE_HOST" == "true" ]] || {
+            echo "::error::v5.7.24 feed promotion requires the explicit installer-only and machine-host inputs"
+            exit 1
+          }
+        else
+          [[ "$WINDOWS_INSTALLER_ONLY" != "true" ]] || {
+            echo "::error::windows_installer_only is reserved for v5.7.24"
+            exit 1
+          }
+        fi
         for name in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH DEPLOY_UPDATE_PATH DEPLOY_STATE_PATH DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
           test -n "${!name}" || { echo "::error::Missing $name"; exit 1; }
         done
@@ -79,7 +95,11 @@ jobs:
         mkdir out
         gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir out
         (cd out && sha256sum --check --strict SHA256SUMS)
-        node services/prepare-release.js out validated "${TAG#v}"
+        if [[ "$WINDOWS_INSTALLER_ONLY" == "true" ]]; then
+          node services/prepare-release.js out validated "${TAG#v}" --windows-installer-only
+        else
+          node services/prepare-release.js out validated "${TAG#v}"
+        fi
         gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
         node - <<'NODE'
         const fs = require('node:fs')

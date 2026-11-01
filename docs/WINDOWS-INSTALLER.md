@@ -609,6 +609,12 @@ pipeline. Manual dispatch must set `windows_installer_only=true` for exactly
 optional blockmap and checksum manifest. The tag is checked before work starts
 and rechecked immediately before creation. `publish=false` only builds the
 artifact; `publish=true` creates the tag and GitHub release after all required
-gates pass. The self-hosted deployment job is explicitly excluded for this
-version. External release webhooks are independent of these workflow guards
-and may react to a GitHub release event.
+gates pass. The self-hosted deployment job is excluded from that build workflow.
+If an accepted installer-only release is explicitly approved for machine-host
+auto-updates, manually dispatch `publish-self-hosted` for `v5.7.24` with both
+`windows_installer_only=true` and `windows_machine_host=true`. That path verifies
+the release checksum, republishes only the installer plus checksum manifest,
+sets the machine-host marker and SHA-256 digest, pins the download URL to the
+Anubis download origin, and updates only the release/update metadata paths.
+Other tags cannot use the installer-only input. External release webhooks are
+independent of these workflow guards and may react to a GitHub release event.
