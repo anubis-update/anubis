@@ -18,11 +18,21 @@ const reasons = {
 // Small activation dialog for Browser PRO. On success it reports back through
 // onActivated so the caller can open the Browser tab (entitlement is now true;
 // the managed-connectivity re-emit updates globalState for later gate checks).
-export default function ActivationModal ({ open, onClose, onActivated }) {
+//
+// `activate` is injected so the same dialog serves both surfaces: the desktop
+// sidebar leaves it undefined and uses the local managed runtime over IPC, while
+// the web surface passes a function that POSTs to the gateway. It resolves to
+// { ok, error, proExpiresAt } and the result is forwarded to onActivated.
+export default function ActivationModal ({ open, onClose, onActivated, activate }) {
   const [key, setKey] = useState('')
   const [loading, setLoading] = useState(false)
 
-  async function activate () {
+  const run = activate || (async (trimmed) => {
+    const r = await window.pre.runGlobalAsync('activateBrowser', trimmed)
+    return { ok: !!(r && r.ok === true), error: r && r.error }
+  })
+
+  async function activateKey () {
     const trimmed = key.trim()
     if (!trimmed) {
       handleErr({ message: 'Activation key is required' })
@@ -30,12 +40,12 @@ export default function ActivationModal ({ open, onClose, onActivated }) {
     }
     setLoading(true)
     try {
-      const r = await window.pre.runGlobalAsync('activateBrowser', trimmed)
+      const r = await run(trimmed)
       if (r && r.ok === true) {
         notification.success({ message: 'Browser PRO activated' })
         setKey('')
         onClose()
-        onActivated()
+        onActivated(r)
       } else {
         handleErr({ message: reasons[r && r.error] || 'Activation failed' })
       }
@@ -65,11 +75,11 @@ export default function ActivationModal ({ open, onClose, onActivated }) {
           value={key}
           autoFocus
           onChange={e => setKey(e.target.value)}
-          onPressEnter={activate}
+          onPressEnter={activateKey}
           disabled={loading}
         />
         <div style={{ textAlign: 'right' }}>
-          <Button type='primary' loading={loading} onClick={activate}>
+          <Button type='primary' loading={loading} onClick={activateKey}>
             Activate
           </Button>
         </div>

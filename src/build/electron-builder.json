@@ -102,6 +102,7 @@
     "artifactName": "${productName}-${version}-${os}-${arch}-installer.${ext}",
     "allowToChangeInstallationDirectory": false,
     "runAfterFinish": false,
+    "createDesktopShortcut": false,
     "installerIcon": "@brand-res/res/icons/win/icon.ico",
     "uninstallerIcon": "@brand-res/res/icons/win/icon.ico",
     "installerHeaderIcon": "@brand-res/res/icons/win/icon.ico",

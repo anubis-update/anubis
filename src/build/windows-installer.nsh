@@ -53,6 +53,34 @@
   !ifndef BUILD_UNINSTALLER
     RequestExecutionLevel admin
     SilentInstall normal
+    ; The assisted desktop-shortcut page uses MUI/nsDialogs macros, which are only
+    ; available after MUI2.nsh is included. The user include is processed in the
+    ; preamble (before MUI2.nsh), so these page helpers live in customHeader, which
+    ; electron-builder inserts after the MUI includes. nsDialogs.nsh is included
+    ; explicitly (idempotent) because per-all-users builds skip multiUserUi.nsh.
+    !include nsDialogs.nsh
+    Function AnubisShortcutPageCreate
+      ; Interactive assisted installs are the only path that reaches this page;
+      ; silent installs skip every page, so $AnubisDesktopShortcut stays 0. The
+      ; customInstall guard additionally blocks the shortcut on updates.
+      ${If} ${Silent}
+        Abort
+      ${EndIf}
+      !insertmacro MUI_HEADER_TEXT "Desktop shortcut" "Choose an optional desktop shortcut for Anubis."
+      nsDialogs::Create 1018
+      Pop $0
+      ${If} $0 == error
+        Abort
+      ${EndIf}
+      ${NSD_CreateCheckbox} 0 20u 100% 12u "Create a desktop shortcut"
+      Pop $AnubisDesktopCheckbox
+      ${NSD_SetState} $AnubisDesktopCheckbox $AnubisDesktopShortcut
+      nsDialogs::Show
+    FunctionEnd
+
+    Function AnubisShortcutPageLeave
+      ${NSD_GetState} $AnubisDesktopCheckbox $AnubisDesktopShortcut
+    FunctionEnd
   !endif
 !macroend
 
@@ -63,6 +91,8 @@
   Var AnubisAllowedUserSids
   Var AnubisMigratePerUser
   Var AnubisServiceStopped
+  Var AnubisDesktopShortcut
+  Var AnubisDesktopCheckbox
 
   Function AnubisPrint
     DetailPrint "$AnubisMessage"
@@ -104,7 +134,9 @@
     SetErrorLevel 1
     StrCpy $AnubisConsole 0
     StrCpy $AnubisConsoleMode 0
+    StrCpy $AnubisDesktopShortcut 0
     StrCpy $AnubisServiceStopped 0
+    ${GetParameters} $R0
     ${GetParameters} $R0
     ClearErrors
     ${GetOptions} $R0 "--silent" $R1
@@ -184,6 +216,10 @@
     StrCpy $AnubisServiceStopped 1
     StrCpy $AnubisMessage "Selected scope: $installMode. Destination: $INSTDIR"
     Call AnubisPrint
+  !macroend
+
+  !macro customPageAfterChangeDir
+    Page custom AnubisShortcutPageCreate AnubisShortcutPageLeave
   !macroend
 
   !macro AnubisCheckUninstallResult
@@ -271,6 +307,16 @@
       Call AnubisFail
     ${EndIf}
     !insertmacro AnubisMachineAction Finish
+    ; Desktop shortcut is created only when the operator ticked the opt-in
+    ; checkbox on an interactive first install. Silent runs and updates never
+    ; show the page, so $AnubisDesktopShortcut stays 0 and no shortcut appears.
+    ${IfNot} ${Silent}
+      ${IfNot} ${isUpdated}
+        ${If} $AnubisDesktopShortcut == 1
+          CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
     StrCpy $AnubisMessage "SYSTEM machine engine is ready. User settings and credentials were preserved."
     Call AnubisPrint
   !macroend
@@ -302,6 +348,7 @@
   !macro customUnInstall
     ${IfNot} ${isUpdated}
       !insertmacro AnubisMachineAction Remove
+      Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
     ${EndIf}
   !macroend
   !macro customRemoveFiles

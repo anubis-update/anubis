@@ -69,6 +69,35 @@ describe('Windows installer contract', () => {
     assert.ok(include.indexOf('SetSilent normal') < include.indexOf('SetSilent silent'))
   })
 
+  it('creates the desktop shortcut only on an interactive opt-in, never silently or on update', () => {
+    // electron-builder must never auto-create the desktop shortcut; the Start
+    // Menu shortcut stays enabled (createStartMenuShortcut is left at default).
+    assert.equal(config.nsis.createDesktopShortcut, false)
+    assert.ok(!('createStartMenuShortcut' in config.nsis) || config.nsis.createStartMenuShortcut !== false)
+    // The opt-in checkbox defaults to unchecked and only an interactive assisted
+    // page can flip it; the page is skipped for silent installs. The update guard
+    // lives in customInstall (the ${isUpdated} macro needs the StdUtils plugin,
+    // which is unavailable where the page function is included).
+    assert.match(include, /StrCpy \$AnubisDesktopShortcut 0/)
+    assert.match(
+      include,
+      /!macro customPageAfterChangeDir\s+Page custom AnubisShortcutPageCreate AnubisShortcutPageLeave\s+!macroend/
+    )
+    assert.match(
+      include,
+      /Function AnubisShortcutPageCreate[\s\S]*?\$\{If\} \$\{Silent\}\s+Abort\s+\$\{EndIf\}/
+    )
+    assert.match(include, /\$\{NSD_CreateCheckbox\} 0 20u 100% 12u "Create a desktop shortcut"/)
+    assert.match(include, /Function AnubisShortcutPageLeave\s+\$\{NSD_GetState\} \$AnubisDesktopCheckbox \$AnubisDesktopShortcut/)
+    // The shortcut is written only when not silent, not an update, and ticked.
+    assert.match(
+      include,
+      /\$\{IfNot\} \$\{Silent\}\s+\$\{IfNot\} \$\{isUpdated\}\s+\$\{If\} \$AnubisDesktopShortcut == 1\s+CreateShortCut "\$DESKTOP\\\$\{PRODUCT_NAME\}\.lnk" "\$INSTDIR\\\$\{APP_EXECUTABLE_FILENAME\}"/
+    )
+    // The uninstaller removes the shortcut on a real uninstall (not on update).
+    assert.match(include, /!insertmacro AnubisMachineAction Remove\s+Delete "\$DESKTOP\\\$\{PRODUCT_NAME\}\.lnk"/)
+  })
+
   it('invokes native x64 PowerShell from both 32-bit NSIS deployment paths', () => {
     const commands = include.split(/\r?\n/).filter(line => /nsExec::ExecToLog/.test(line))
     assert.equal(commands.length, 2)

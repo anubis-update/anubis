@@ -1,7 +1,7 @@
 import AddressBar from './address-bar'
 import WebAuthModal from './web-auth-modal'
 import RbiView from './rbi-view'
-import BrowserPanel from './browser-panel'
+import WebBrowserGate from './web-browser-gate'
 import { notification } from '../common/notification'
 import { handleErr } from '../../common/fetch'
 import { buildProfile, sanitizeFileBase } from './browser-profile'
@@ -296,22 +296,17 @@ export default function WebSession ({ tab, reloadTab }) {
     <div className='web-session-wrap'>
       {!tab.hideAddressBar && <AddressBar {...addrProps} />}
       {/*
-        Defense in depth: BrowserPanel is a PRO surface. The authoritative
-        entitlement gate lives in the sidebar (menu-preview.jsx), which reads
-        the per-device managed status before opening this tab. We intentionally
-        do NOT re-check entitlement here: this panel only renders in the web
-        build (!embedded), where globals route over WS to the pinned anubis-web
-        gateway whose run-sync allowlist has no getManagedConnectivity, so
-        entitlement is physically unreadable from the web client. Keeping the
-        sidebar gate authoritative is the agreed approach.
-        TODO: gate the panel directly once the pinned gateway exposes managed
-        connectivity to the web client.
+        BrowserPanel is a PRO surface. On the web build (!embedded) the gate is
+        now authoritative here: WebBrowserGate reads entitlement from the pinned
+        gateway (GET /_anubis/browser-entitlement) each time the panel opens and
+        is fail-closed, rendering the panel only when the gateway confirms the
+        device is entitled; otherwise it shows the activation flow. The sidebar
+        gate (menu-preview.jsx) remains the desktop-build path and is untouched.
       */}
       {!embedded && valid && (
-        <BrowserPanel
+        <WebBrowserGate
           activeUa={activeUa}
           engine={engine}
-          entitled
           contextNote={contextNote}
           onChangeEngine={onChangeEngine}
           onApplyUa={onApplyUa}
