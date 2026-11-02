@@ -1,0 +1,66 @@
+name: Inspect release hook read-only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Discover release service identity without environment or credentials
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            test -n "${!name}" || { echo "::error::Missing existing deployment configuration"; exit 1; }
+          done
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.-]+$ && "$DEPLOY_USER" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 1
+          port="${DEPLOY_PORT:-22}"
+          [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || exit 1
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ssh"
+          trap 'rm -f "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          ssh -p "$port" -i "$RUNNER_TEMP/ssh/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" -o ConnectTimeout=15 "$DEPLOY_USER@$DEPLOY_HOST" 'python3 -' <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          def output(*args):
+              return subprocess.check_output(args, text=True, timeout=15).strip()
+          lines = output('systemctl', 'list-unit-files', '--type=service', '--no-legend', '--no-pager').splitlines()
+          units = [line.split()[0] for line in lines if line.split() and re.fullmatch(r'[A-Za-z0-9@_.-]+\.service', line.split()[0]) and 'anubis' in line.split()[0].lower() and 'release' in line.split()[0].lower()]
+          if not units or len(units) > 8:
+              raise SystemExit('No bounded unambiguous Anubis release service candidates; no mutation performed')
+          for unit in units:
+              properties = dict(line.split('=', 1) for line in output('systemctl', 'show', unit, '--property=User,WorkingDirectory,FragmentPath,MainPID,ActiveState').splitlines() if '=' in line)
+              result = {'unit': unit, **properties}
+              pid = properties.get('MainPID', '0')
+              if pid.isdigit() and int(pid) > 0:
+                  try:
+                      cwd = pathlib.Path(os.readlink('/proc/' + pid + '/cwd'))
+                      args = pathlib.Path('/proc/' + pid + '/cmdline').read_bytes().split(b'\0')
+                      scripts = [os.fsdecode(arg) for arg in args if os.fsdecode(arg).endswith('/release-api.js') or arg == b'release-api.js']
+                      if len(scripts) == 1:
+                          script = pathlib.Path(scripts[0])
+                          if not script.is_absolute():
+                              script = cwd / script
+                          script = script.resolve(strict=True)
+                          if script.stat().st_size > 1048576:
+                              raise SystemExit('Release script exceeds bounded inspection size')
+                          data = script.read_bytes()
+                          result.update(script=str(script), scriptSha256=hashlib.sha256(data).hexdigest(), scriptBytes=len(data), writable=os.access(script, os.W_OK), parentWritable=os.access(script.parent, os.W_OK), exact26BarrierPresent=b'/^v?5\\.7\\.26$/' in data)
+                      else:
+                          result['scriptStatus'] = 'No unique release-api.js process argument; no other arguments disclosed'
+                  except PermissionError:
+                      result['scriptStatus'] = 'Process metadata permission denied'
+              print(json.dumps(result, sort_keys=True))
+          PY
