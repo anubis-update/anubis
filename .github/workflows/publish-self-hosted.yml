@@ -115,7 +115,9 @@ jobs:
         else
           node services/prepare-release.js out validated "${TAG#v}"
         fi
-        gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release.json
+        release_id="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')"
+        [[ "$release_id" =~ ^[0-9]+$ ]] || { echo "::error::Invalid release ID"; exit 1; }
+        gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > release.json
         node - <<'NODE'
         const fs = require('node:fs')
         const assert = require('node:assert/strict')
