@@ -33,7 +33,7 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/key"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
           ssh -p "$port" -i "$RUNNER_TEMP/ssh/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" -o ConnectTimeout=15 "$DEPLOY_USER@$DEPLOY_HOST" 'python3 -' <<'PY'
-          import hashlib, json, os, pathlib, re, subprocess
+          import hashlib, json, os, pathlib, re, shlex, subprocess
           def output(*args):
               return subprocess.check_output(args, text=True, timeout=15).strip()
           lines = output('systemctl', 'list-unit-files', '--type=service', '--no-legend', '--no-pager').splitlines()
@@ -44,9 +44,35 @@ jobs:
               properties = dict(line.split('=', 1) for line in output('systemctl', 'show', unit, '--property=User,WorkingDirectory,FragmentPath,MainPID,ActiveState').splitlines() if '=' in line)
               result = {'unit': unit, **properties}
               start = output('systemctl', 'show', unit, '--property=ExecStart', '--value')
-              declared = re.findall(r'(?<![A-Za-z0-9_])(/[A-Za-z0-9_./-]+/release-api\.js)(?=[ ;}]|$)', start)
+              executable = re.search(r'(?:^|[ {;])path=([^ ;}]+)', start)
+              if executable and re.fullmatch(r'/[A-Za-z0-9_./-]+', executable[1]):
+                  result['executablePath'] = executable[1]
+              argv = re.search(r'argv\[\]=(.*?)(?: ; [A-Za-z_]+=| }$)', start)
+              words = shlex.split(argv[1]) if argv else []
+              cwd = pathlib.Path(properties.get('WorkingDirectory', ''))
+              declared = [word for word in words if re.fullmatch(r'[A-Za-z0-9_./-]*release-api\.js', word) and pathlib.Path(word).name == 'release-api.js']
+              if not declared:
+                  wrappers = [word for word in words if re.fullmatch(r'[A-Za-z0-9_./-]+\.sh', word)]
+                  if len(wrappers) == 1 and cwd.is_absolute():
+                      wrapper = pathlib.Path(wrappers[0])
+                      if not wrapper.is_absolute():
+                          wrapper = cwd / wrapper
+                      try:
+                          wrapper = wrapper.resolve(strict=True)
+                          result['wrapperPath'] = str(wrapper)
+                          if wrapper.stat().st_size <= 65536:
+                              text = wrapper.read_text()
+                              declared = re.findall(r'(?<![A-Za-z0-9_$/{-])([A-Za-z0-9_./-]*release-api\.js)(?=[\s\'";]|$)', text)
+                      except PermissionError:
+                          result['wrapperStatus'] = 'Read permission denied'
               if len(set(declared)) == 1:
                   script = pathlib.Path(declared[0])
+                  result['declaredReleaseScriptArgument'] = str(script)
+                  if not script.is_absolute():
+                      if not cwd.is_absolute():
+                          raise SystemExit('Relative script without proven absolute WorkingDirectory')
+                      script = cwd / script
+                  script = script.resolve(strict=True)
                   result['declaredReleaseScript'] = str(script)
                   result['declaredScriptWritable'] = os.access(script, os.W_OK)
                   result['declaredParentWritable'] = os.access(script.parent, os.W_OK)
@@ -56,8 +82,16 @@ jobs:
                       data = script.read_bytes()
                       result['declaredScriptSha256'] = hashlib.sha256(data).hexdigest()
                       result['declaredScriptExact26BarrierPresent'] = b'/^v?5\\.7\\.26$/' in data
+                      result['declaredScriptHmacPresent'] = b'createHmac' in data and b'timingSafeEqual' in data
+                      result['declaredScriptPublishedPredicatePresent'] = b"action !== 'published'" in data
                   except PermissionError:
                       result['declaredScriptStatus'] = 'Script read permission denied'
+              privileges = subprocess.run(['sudo', '-n', '-l'], text=True, capture_output=True, timeout=15)
+              allowed = privileges.stdout if privileges.returncode == 0 else ''
+              restart = '/usr/bin/systemctl restart ' + unit
+              result['canRestartExactUnit'] = any(line.strip().endswith(restart) and 'NOPASSWD:' in line and '!' not in line for line in allowed.splitlines())
+              result['sudoListingAvailable'] = privileges.returncode == 0
+              result['canWriteExactScript'] = result.get('declaredScriptWritable', False) and result.get('declaredParentWritable', False)
               pid = properties.get('MainPID', '0')
               if pid.isdigit() and int(pid) > 0:
                   try:
