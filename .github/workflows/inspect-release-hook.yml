@@ -43,6 +43,21 @@ jobs:
           for unit in units:
               properties = dict(line.split('=', 1) for line in output('systemctl', 'show', unit, '--property=User,WorkingDirectory,FragmentPath,MainPID,ActiveState').splitlines() if '=' in line)
               result = {'unit': unit, **properties}
+              start = output('systemctl', 'show', unit, '--property=ExecStart', '--value')
+              declared = re.findall(r'(?<![A-Za-z0-9_])(/[A-Za-z0-9_./-]+/release-api\.js)(?=[ ;}]|$)', start)
+              if len(set(declared)) == 1:
+                  script = pathlib.Path(declared[0])
+                  result['declaredReleaseScript'] = str(script)
+                  result['declaredScriptWritable'] = os.access(script, os.W_OK)
+                  result['declaredParentWritable'] = os.access(script.parent, os.W_OK)
+                  try:
+                      if script.stat().st_size > 1048576:
+                          raise SystemExit('Release script exceeds bounded inspection size')
+                      data = script.read_bytes()
+                      result['declaredScriptSha256'] = hashlib.sha256(data).hexdigest()
+                      result['declaredScriptExact26BarrierPresent'] = b'/^v?5\\.7\\.26$/' in data
+                  except PermissionError:
+                      result['declaredScriptStatus'] = 'Script read permission denied'
               pid = properties.get('MainPID', '0')
               if pid.isdigit() and int(pid) > 0:
                   try:
