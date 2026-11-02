@@ -32,3 +32,21 @@ test('installer-only feed promotion requires explicit machine-host acceptance fo
   assert.match(download.run, /--windows-installer-only/)
   assert.match(download.run, /release\.assets\.length, files\.length/)
 })
+
+test('draft CDN staging is explicit and cannot expose update metadata', () => {
+  const publish = workflow('publish-self-hosted.yml')
+  assert.equal(publish.on.workflow_dispatch.inputs.stage_only.default, false)
+  const steps = publish.jobs.publish.steps
+  const guard = steps.find(step => step.name === 'Validate restricted deployment configuration')
+  assert.match(guard.run, /STAGE_ONLY" == "true"/)
+  assert.match(guard.run, /Draft CDN staging requires explicit installer-only and machine-host inputs/)
+  const download = steps.find(step => step.name === 'Download and verify the existing release')
+  assert.match(download.run, /release\.draft, process\.env\.STAGE_ONLY === 'true'/)
+  const upload = steps.find(step => step.name === 'Upload verified assets before exposing the update')
+  assert.match(upload.run, /sha256sum --check --strict SHA256SUMS/)
+  assert.doesNotMatch(upload.run, /publish-update|mirrored-release|version\.html/)
+  const expose = steps.find(step => step.name === 'Expose verified update metadata')
+  assert.match(expose.if, /^\$\{\{ inputs.stage_only != true \}\}$/)
+  assert.match(expose.run, /publish-update\.js/)
+  assert.ok(steps.indexOf(upload) < steps.indexOf(expose))
+})

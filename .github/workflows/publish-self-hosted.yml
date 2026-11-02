@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      stage_only:
+        description: 'Stage a verified draft Windows-only release on the CDN without changing any update metadata'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -42,6 +47,7 @@ jobs:
       TAG: ${{ inputs.tag }}
       WINDOWS_MACHINE_HOST: ${{ inputs.windows_machine_host }}
       WINDOWS_INSTALLER_ONLY: ${{ inputs.windows_installer_only }}
+      STAGE_ONLY: ${{ inputs.stage_only }}
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -69,6 +75,12 @@ jobs:
         else
           [[ "$WINDOWS_INSTALLER_ONLY" != "true" ]] || {
             echo "::error::windows_installer_only is reserved for v5.7.24/v5.7.25"
+            exit 1
+          }
+        fi
+        if [[ "$STAGE_ONLY" == "true" ]]; then
+          [[ "$WINDOWS_INSTALLER_ONLY" == "true" && "$WINDOWS_MACHINE_HOST" == "true" ]] || {
+            echo "::error::Draft CDN staging requires explicit installer-only and machine-host inputs"
             exit 1
           }
         fi
@@ -108,7 +120,7 @@ jobs:
         const brand = require('./src/common/brand.config')
         const release = JSON.parse(fs.readFileSync('release.json', 'utf8'))
         assert.equal(release.tag_name, process.env.TAG)
-        assert.equal(release.draft, false)
+        assert.equal(release.draft, process.env.STAGE_ONLY === 'true')
         assert.equal(release.prerelease, false)
         const files = fs.readdirSync('validated')
         assert.equal(release.assets.length, files.length)
@@ -135,6 +147,12 @@ jobs:
         $SSH_COMMAND "$remote" "mkdir -p '$DEPLOY_PATH/releases/$TAG' '$DEPLOY_STATE_PATH'"
         rsync -a -s --partial -e "$SSH_COMMAND" validated/ "$remote:$DEPLOY_PATH/releases/$TAG/"
         $SSH_COMMAND "$remote" "cd '$DEPLOY_PATH/releases/$TAG' && sha256sum --check --strict SHA256SUMS && ln -sfn 'releases/$TAG' '$DEPLOY_PATH/$TAG'"
+
+    - name: Expose verified update metadata
+      if: ${{ inputs.stage_only != true }}
+      run: |
+        set -euo pipefail
+        remote="$DEPLOY_USER@$DEPLOY_HOST"
         rsync -a -s -e "$SSH_COMMAND" services/publish-update.js mirrored-release.json "$remote:$DEPLOY_STATE_PATH/"
         $SSH_COMMAND "$remote" "node '$DEPLOY_STATE_PATH/publish-update.js' '$DEPLOY_STATE_PATH/mirrored-release.json' '$DEPLOY_UPDATE_PATH'"
         $SSH_COMMAND "$remote" "node '$DEPLOY_STATE_PATH/publish-update.js' '$DEPLOY_STATE_PATH/mirrored-release.json' '$DEPLOY_PATH'"

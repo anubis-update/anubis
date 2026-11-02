@@ -413,6 +413,14 @@ the existing desktop. All other packaged assertions remain enabled. The policy
 test explicitly sets `ANUBIS_ADMIN_AI_LOCK=1`, since AI settings are otherwise
 user-configurable. Do not report the excluded test as passed.
 
+For the scoped installer-only releases24/25, the manual `publish-self-hosted`
+workflow supports `stage_only=true` with both Windows acceptance flags. It
+requires an existing draft release, verifies its exact asset/checksum set, then
+uploads the CDN files without publishing update metadata. Verify the direct CDN
+response before publishing the GitHub release. A separate normal workflow run
+requires the published stable release and exposes the feed only after verified
+upload. Neither operation deploys application/control-plane code.
+
 An already elevated administrator runs the **installed** helper:
 
 ```powershell
