@@ -42,7 +42,8 @@ function readBody (req) {
 
 function createServer ({
   dataDir = process.env.DATA_DIR || '/var/lib/anubis-mgmt',
-  adminToken = process.env.ADMIN_TOKEN || ''
+  adminToken = process.env.ADMIN_TOKEN || '',
+  trustedProxies = (process.env.ANUBIS_MANAGED_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean)
 } = {}) {
   const dashboard = fs.readFileSync(path.join(__dirname, 'management-dashboard.html'), 'utf8').replace(/\r\n?/g, '\n')
   const hashes = tag => [...dashboard.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g'))]
@@ -69,7 +70,7 @@ function createServer ({
   function reports () {
     return fs.readFileSync(reportsFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
   }
-  const gateway = createGateway({ dataDir, isAdmin })
+  const gateway = createGateway({ dataDir, isAdmin, trustedProxies })
   const server = http.createServer(async (req, res) => {
     try {
       if (await gateway.handle(req, res)) return

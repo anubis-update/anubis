@@ -5,7 +5,7 @@ const ALLOWED_FUNCTIONS = new Set([
   'abortAIRequest', 'encryptAsync', 'decryptAsync', 'lookup', 'loadSshConfig',
   'listSerialPorts', 'loadFontList', 'listItermThemes', 'saveUserConfig',
   'watchFile', 'unwatchFile', 'listWidgets', 'runWidget', 'stopWidget',
-  'runWidgetFunc', 'checkDbUpgrade', 'doUpgrade', 'getEnv'
+  'runWidgetFunc', 'checkDbUpgrade', 'doUpgrade', 'getEnv', 'getHardwareInventory'
 ])
 const BROWSER_TABLES = new Set([
   'bookmarks', 'bookmarkGroups', 'addressBookmarks', 'terminalThemes',

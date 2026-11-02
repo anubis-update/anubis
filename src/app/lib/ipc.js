@@ -346,6 +346,7 @@ function initIpc () {
     }
   })
   const asyncGlobals = {
+    getHardwareInventory: () => require('@ai-security-tool/managed-access/hardware-inventory').getHardwareInventory(),
     getManagedConnectivity: () => globalState.get('managedConnectivity') || { status: 'offline' },
     activateBrowser: (key) => {
       const fn = globalState.get('managedActivate')

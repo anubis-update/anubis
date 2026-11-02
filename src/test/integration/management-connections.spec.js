@@ -71,6 +71,11 @@ async function fixture (t, agents) {
     status: state.reportsStatus, json: { installs: [] }
   }))
   await page.route('**/api/agents/*/*', route => {
+    if (new URL(route.request().url()).pathname.endsWith('/web-user') && route.request().method() === 'GET') {
+      return route.fulfill({
+        json: { configured: false, synced: false, updatedAt: null, syncedAt: null, role: 'user', workspace: 'SYSTEM' }
+      })
+    }
     state.posts.push({ path: new URL(route.request().url()).pathname, method: route.request().method() })
     assert.equal(route.request().headers().authorization, 'Bearer ' + adminToken)
     return route.fulfill({ status: 409, json: { error: 'Unexpected fixture action' } })
@@ -85,6 +90,65 @@ async function fixture (t, agents) {
   })
   return { page, context, base, state, adminToken }
 }
+
+test('hardware rows show per-adapter VRAM, membership and observed IPv4 without inventing legacy or offline data', { timeout: 60000 }, async t => {
+  const now = Date.now()
+  const reported = agent('1', {
+    inventoryReceivedAt: now,
+    inventory: {
+      status: 'partial',
+      memory: { totalPhysicalBytes: 24 * 1024 ** 3 },
+      gpu: {
+        status: 'ok',
+        adapters: [
+          { name: '<img src=x onerror=alert(1)>', kind: 'dedicated', dedicatedVideoMemoryBytes: 12 * 1024 ** 3, sharedSystemMemoryBytes: 8 * 1024 ** 3 },
+          { name: 'Integrated adapter', kind: 'integrated', dedicatedVideoMemoryBytes: 0, sharedSystemMemoryBytes: 8 * 1024 ** 3 }
+        ]
+      },
+      domain: { partOfDomain: false, workgroup: 'WORKGROUP' }
+    },
+    connection: { ipv4: '8.8.8.8', observedAt: now, countryCode: null }
+  })
+  const offline = agent('2', {
+    online: false,
+    inventoryReceivedAt: now - 60 * 60 * 1000,
+    inventory: {
+      status: 'partial',
+      memory: { totalPhysicalBytes: 16 * 1024 ** 3 },
+      gpu: { adapters: [{ name: 'Remote display adapter', dedicatedVideoMemoryBytes: null, sharedSystemMemoryBytes: null }] },
+      domain: { partOfDomain: true, domain: 'example.test' }
+    },
+    connection: { ipv4: '1.1.1.1', observedAt: now - 60 * 60 * 1000 }
+  })
+  const { page, state } = await fixture(t, [offline, agent('3'), reported])
+  await page.setViewportSize({ width: 2200, height: 1100 })
+  const row = page.locator('#agent-rows tr').filter({ hasText: reported.id })
+  await expect(row.locator('[data-hardware="memory"]')).toContainText('RAM: 24.0 GiB')
+  await expect(row).toContainText('12.0 GiB dedicated VRAM')
+  await expect(row).toContainText('0.0 GiB dedicated VRAM')
+  await expect(row).toContainText('Shared budget: 8.0 GiB')
+  await expect(row).toContainText('Workgroup: WORKGROUP')
+  await expect(row).toContainText('8.8.8.8')
+  await expect(row.locator('img')).toHaveCount(0)
+  await expect(page.locator('#agent-rows tr').first()).toHaveAttribute('data-agent-id', reported.id)
+  const stale = page.locator('#agent-rows tr').filter({ hasText: offline.id })
+  await expect(stale).toContainText('Unknown dedicated VRAM')
+  await expect(stale).toContainText('Domain: example.test')
+  await expect(stale).toContainText('Last known snapshot; may be stale')
+  await expect(stale).toContainText('Last known; not a current connection')
+  const legacy = page.locator('#agent-rows tr').filter({ hasText: agent('3').id })
+  await expect(legacy).toContainText('RAM: Unknown')
+  await expect(legacy).toContainText('Not reported by this agent')
+  await expect(legacy.locator('[data-hardware="domain"]')).toHaveText('Unknown')
+  if (process.env.ANUBIS_INVENTORY_SCREENSHOT) {
+    await page.screenshot({ path: process.env.ANUBIS_INVENTORY_SCREENSHOT, fullPage: true })
+  }
+  state.managedStatus = 503
+  await page.locator('#refresh').click()
+  await expect(page.locator('#agent-summary')).toContainText('Stale inventory')
+  await expect(row).toContainText('24.0 GiB')
+  await expect(row).toContainText('Last known snapshot; may be stale')
+})
 
 test('Web password settings opens and focuses the form inside the viewport on a long device list', { timeout: 60000 }, async t => {
   const agents = Array.from({ length: 24 }, (_, index) => agent((index + 1).toString(16)))

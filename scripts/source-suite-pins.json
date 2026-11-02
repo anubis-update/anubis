@@ -15,9 +15,9 @@
     },
     "managed-access": {
       "repository": "https://github.com/Anubis-Security-Tool/anubis-managed-access",
-      "commit": "faa5a58e2ea4491d3a1cb988185a70a7839c7abc",
+      "commit": "fd2eb4b8ca41191db758330497dbc7973f724faf",
       "packageName": "@ai-security-tool/managed-access",
-      "version": "1.0.4"
+      "version": "1.0.6"
     },
     "sync-server-node": {
       "repository": "https://github.com/Anubis-Security-Tool/anubis-sync-server-node",

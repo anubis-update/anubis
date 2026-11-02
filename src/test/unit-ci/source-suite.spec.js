@@ -29,7 +29,7 @@ function pinsFixture () {
       commit,
       ...(name === 'web' ? { packageName: 'anubis-web', version: '5.7.6' } : {}),
       ...(name === 'resource' ? { packageName: '@ai-security-tool/resource', version: '2.2.3' } : {}),
-      ...(name === 'managed-access' ? { packageName: '@ai-security-tool/managed-access', version: '1.0.4' } : {}),
+      ...(name === 'managed-access' ? { packageName: '@ai-security-tool/managed-access', version: '1.0.6' } : {}),
       ...(name === 'sync-server-node' ? { packageName: 'anubis-sync-server-node', version: '1.0.0' } : {})
     }
   ]))
@@ -203,10 +203,10 @@ describe('source suite bootstrap', () => {
       'anubis-web': {
         name: 'anubis-web',
         version: '5.7.6',
-        dependencies: { '@ai-security-tool/managed-access': '1.0.4' },
+        dependencies: { '@ai-security-tool/managed-access': '1.0.6' },
         devDependencies: {
           '@ai-security-tool/electerm-react': '5.7.6',
-          '@ai-security-tool/managed-access': '1.0.4',
+          '@ai-security-tool/managed-access': '1.0.6',
           '@ai-security-tool/resource': '2.2.3'
         },
         scripts: { 'stage-browser-assets': 'node build/bin/browser-assets.js' }
@@ -217,7 +217,7 @@ describe('source suite bootstrap', () => {
         devDependencies: { png2icons: '1.0.0', sharp: '1.0.0' },
         scripts: { prepare: 'node bin/build-brand-icons.js' }
       },
-      'anubis-managed-access': { name: '@ai-security-tool/managed-access', version: '1.0.4' },
+      'anubis-managed-access': { name: '@ai-security-tool/managed-access', version: '1.0.6' },
       'anubis-sync-server-node': { name: 'anubis-sync-server-node', version: '1.0.0' }
     }
 

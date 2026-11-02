@@ -54,9 +54,10 @@ a { color: #9ccaff; }
 <p class="muted" id="managed-access-help">From another PC, sign in here and choose Open device for the approved Online installation. The device address alone does not grant access. A compatible Windows machine host offers its Windows workspace chooser inside the device page; each selected profile keeps its own password and data. This is access to Anubis on that machine, not Windows screen sharing. The standalone Web demo is a separate installation.</p>
 <p class="muted" id="connection-auth-help">Copy device URL copies only the nonsecret HTTPS address, not authorization. A different browser or incognito needs its own Web sign-in. Open device does not bypass passwords. Web administrator access uses the separate per-device password configured here; User access uses a unique password owned by a protected local file on that device, not a universal default. User access stays in the separate SYSTEM Web workspace, not the ordinary Desktop user's profile. Additional Windows profiles still require explicit policy authorization and their existing app-profile password from the profile owner. This panel cannot retrieve, set or reset Windows or native app-profile passwords. No SSH/RDP/VNC address, port or password is advertised by this inventory.</p>
 <p class="muted">Windows accounts, SIDs, sessions and workspace availability are not advertised in this inventory. On compatible Windows machine hosts, Open device starts with the separate SYSTEM profile; explicitly select an available logged-on user inside that page for that user's data. MCP stays in its administrative workspace. Neither an online tunnel nor a temporary MCP grant proves a successful application login or protocol connection.</p>
+<p class="muted">Hardware is the device's last reported snapshot, not a live measurement. GPU memory is listed per adapter; shared system-memory budgets are not dedicated VRAM. Domain membership does not prove a corporate network, and a workgroup does not prove a home network. IPv4 is the public address observed on the device's authenticated tunnel (possibly a NAT/VPN exit), not the operator's browser address.</p>
 <div class="table">
 <table>
-<thead><tr><th>Device</th><th>Application / platform</th><th>Enrollment</th><th>Presence</th><th>Connection</th><th>Actions</th></tr></thead>
+<thead><tr><th>Device</th><th>Application / platform</th><th>RAM / GPU memory</th><th>Domain / workgroup</th><th>Public IPv4</th><th>Enrollment</th><th>Presence</th><th>Connection</th><th>Actions</th></tr></thead>
 <tbody id="agent-rows"></tbody>
 </table>
 </div>
@@ -501,6 +502,41 @@ element('web-user-form').addEventListener('submit', async event => {
   }
 })
 
+function memorySize (bytes) {
+  return Number.isSafeInteger(bytes) && bytes >= 0
+    ? (bytes / (1024 ** 3)).toFixed(1) + ' GiB'
+    : 'Unknown'
+}
+
+function renderHardware (row, agent, fresh) {
+  const inventory = agent.inventory
+  const memory = text(row, 'td', 'RAM: ' + memorySize(inventory?.memory?.totalPhysicalBytes))
+  memory.dataset.hardware = 'memory'
+  const adapters = inventory?.gpu?.adapters
+  if (Array.isArray(adapters) && adapters.length) {
+    for (const gpu of adapters) {
+      text(memory, 'small', (gpu.name || 'GPU') + ': ' + memorySize(gpu.dedicatedVideoMemoryBytes) + ' dedicated VRAM')
+      text(memory, 'small', 'Shared budget: ' + memorySize(gpu.sharedSystemMemoryBytes) + ' (' + (gpu.kind || 'unknown') + ')')
+    }
+    if (inventory.gpu.truncated) text(memory, 'small', 'Adapter list truncated')
+  } else text(memory, 'small', inventory?.gpu?.status === 'ok' ? 'No GPU reported' : 'GPU memory: Unknown')
+  if (inventory) {
+    text(memory, 'small', 'Snapshot: ' + inventory.status)
+    if (agent.inventoryReceivedAt) text(memory, 'small', 'Received: ' + timestamp(agent.inventoryReceivedAt))
+    if (!fresh || !agent.online || !agent.inventoryReceivedAt ||
+        Date.now() - agent.inventoryReceivedAt > 20 * 60 * 1000) {
+      text(memory, 'small', 'Last known snapshot; may be stale')
+    }
+  } else text(memory, 'small', 'Not reported by this agent')
+  const membership = inventory?.domain
+  const domain = text(row, 'td', membership?.partOfDomain === true
+    ? 'Domain: ' + (membership.domain || 'Unknown')
+    : membership?.partOfDomain === false
+      ? 'Workgroup: ' + (membership.workgroup || 'Unknown')
+      : 'Unknown')
+  domain.dataset.hardware = 'domain'
+}
+
 function renderAgents (agents, fresh = true) {
   latestAgents = agents
   agentsFresh = fresh
@@ -526,6 +562,12 @@ function renderAgents (agents, fresh = true) {
     if (agent.createdAt) text(name, 'small', 'Enrolled: ' + timestamp(agent.createdAt))
     const application = text(row, 'td', agent.app + ' ' + agent.version)
     text(application, 'small', agent.platform + ' ' + agent.arch)
+    renderHardware(row, agent, fresh)
+    const network = text(row, 'td', agent.connection?.ipv4 || 'Unknown')
+    if (agent.connection?.observedAt) {
+      text(network, 'small', 'Last observed: ' + timestamp(agent.connection.observedAt))
+      if (!fresh || !agent.online) text(network, 'small', 'Last known; not a current connection')
+    }
     const enrollment = text(row, 'td', agent.status)
     text(enrollment, 'small', 'SHA-256 fingerprint')
     text(enrollment, 'code', agent.fingerprint)

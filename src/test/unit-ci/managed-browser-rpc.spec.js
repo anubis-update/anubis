@@ -42,6 +42,14 @@ test('browser authentication verifies the existing desktop password independentl
   }
 })
 
+test('hardware inventory is an explicit read-only browser RPC, not part of unauthenticated constants', async () => {
+  const inventory = { schemaVersion: 1, status: 'unavailable' }
+  const { rpc } = fixture({ functions: { getHardwareInventory: () => inventory } })
+  assert.deepEqual(await rpc('getHardwareInventory'), inventory)
+  assert.equal((await rpc('browserInfo')).hardwareInventory, undefined)
+  await assert.rejects(rpc('refreshHardwareInventory'), /Unsupported/)
+})
+
 test('browser RPC denies native process controls, prototype pivots and authentication records', async () => {
   const { rpc, db } = fixture()
   for (const func of ['constructor', '__proto__', 'toString', 'closeApp', 'restart', 'safeDecrypt', 'setPassword', 'onAuthorizedLogin', 'isHeadlessAuthorized']) {

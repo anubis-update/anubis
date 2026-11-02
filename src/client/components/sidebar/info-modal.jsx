@@ -25,6 +25,7 @@ import {
   infoTabs
 } from '../../common/constants'
 import { checkSkipSrc } from '../../common/check-skip-src'
+import { hardwareDetails } from '../../common/hardware-inventory-view.mjs'
 import './info.styl'
 
 const e = window.translate
@@ -32,6 +33,30 @@ const e = window.translate
 export default auto(function InfoModal (props) {
   const [runtimeEnv, setRuntimeEnv] = useState(null)
   const [managed, setManaged] = useState(null)
+  const [hardware, setHardware] = useState(null)
+  const [hardwareError, setHardwareError] = useState('')
+  useEffect(() => {
+    if (!window.store.showInfoModal || props.infoModalTab !== infoTabs.os) return
+    let active = true
+    let timer
+    const update = async () => {
+      try {
+        const value = await window.pre.runGlobalAsync('getHardwareInventory')
+        if (!active) return
+        setHardware(value)
+        setHardwareError('')
+      } catch (error) {
+        if (!active) return
+        setHardwareError('Hardware inventory unavailable: ' + error.message)
+      }
+      if (active) timer = setTimeout(update, 5000)
+    }
+    update()
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [window.store.showInfoModal, props.infoModalTab])
   useEffect(() => {
     if (!window.store.showInfoModal || window.et.isWebApp) return
     const update = (_, value) => setManaged(value)
@@ -110,7 +135,7 @@ export default auto(function InfoModal (props) {
   }
 
   const renderOSInfo = () => {
-    return window.pre.osInfo().map(({ k, v }, i) => (
+    const rows = window.pre.osInfo().map(({ k, v }, i) => (
       <div className='pd1b' key={i + '_os_' + k}>
         <b className='bold'>{k}:</b>
         <span className='mg1l'>
@@ -118,6 +143,23 @@ export default auto(function InfoModal (props) {
         </span>
       </div>
     ))
+    return (
+      <>
+        <div className='pd1b' data-testid='hardware-inventory'>
+          <b className='bold'>Hardware / domain inventory:</b>
+          <div className='pd1t'>
+            {hardwareError
+              ? <span role='alert'>{hardwareError}</span>
+              : hardware ? renderParsed(hardwareDetails(hardware)) : <span>Collecting...</span>}
+          </div>
+          <div className='pd1t'>
+            Domain membership is not proof of a corporate network. A workgroup is not proof of a home network.
+            Shared GPU memory is a system-memory budget, not dedicated VRAM.
+          </div>
+        </div>
+        {rows}
+      </>
+    )
   }
 
   const { infoModalTab, commandLineHelp } = props

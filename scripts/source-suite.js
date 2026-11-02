@@ -14,7 +14,7 @@ const defaultComponents = ['web', 'resource', 'managed-access', 'sync-server-nod
 const optionalComponents = new Set(['cloudflare-sync', 'http-tunnel', 'rdpjs', 'site'])
 const packageSpecs = {
   resource: { name: '@ai-security-tool/resource', version: '2.2.3', scripts: true },
-  'managed-access': { name: '@ai-security-tool/managed-access', version: '1.0.4', scripts: false },
+  'managed-access': { name: '@ai-security-tool/managed-access', version: '1.0.6', scripts: false },
   renderer: { name: '@ai-security-tool/electerm-react', scripts: false },
   'browser-assets': { name: '@ai-security-tool/anubis-browser-assets', scripts: false }
 }
