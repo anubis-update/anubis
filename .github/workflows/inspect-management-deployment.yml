@@ -1,0 +1,77 @@
+name: Inspect management deployment read-only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Inspect exact management unit and code boundary
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            test -n "${!name}" || { echo "::error::Missing existing deployment configuration"; exit 1; }
+          done
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.-]+$ && "$DEPLOY_USER" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 1
+          port="${DEPLOY_PORT:-22}"
+          [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || exit 1
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ssh"
+          trap 'rm -f "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          ssh -p "$port" -i "$RUNNER_TEMP/ssh/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" -o ConnectTimeout=15 "$DEPLOY_USER@$DEPLOY_HOST" 'python3 -' <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          def output(*args):
+              return subprocess.check_output(args, text=True, timeout=15).strip()
+          unit = 'anubis-mgmt-api.service'
+          props = dict(line.split('=', 1) for line in output('systemctl', 'show', unit, '--property=LoadState,User,WorkingDirectory,FragmentPath,MainPID,ActiveState').splitlines() if '=' in line)
+          result = {'unit': unit, **props}
+          cwd = pathlib.Path(props.get('WorkingDirectory', ''))
+          raw = output('systemctl', 'show', unit, '--property=ExecStart', '--value')
+          executable = re.search(r'(?:^|[ {;])path=([^ ;}]+)', raw)
+          if executable and re.fullmatch(r'/[A-Za-z0-9_./-]+', executable[1]):
+              result['executablePath'] = executable[1]
+          candidates = re.findall(r'(?<![A-Za-z0-9_$/{-])([A-Za-z0-9_./-]*management-api\.js)(?=[\s\'";}]|$)', raw)
+          if len(set(candidates)) == 1 and cwd.is_absolute():
+              script = pathlib.Path(candidates[0])
+              if not script.is_absolute():
+                  script = cwd / script
+              result['declaredScriptPath'] = str(script)
+              try:
+                  script = script.resolve(strict=True)
+                  result['resolvedScriptPath'] = str(script)
+                  result['scriptWritable'] = os.access(script, os.W_OK)
+                  result['parentWritable'] = os.access(script.parent, os.W_OK)
+                  for name in ['management-api.js', 'management-dashboard.html']:
+                      file = script.parent / name
+                      if file.stat().st_size > 2097152:
+                          raise SystemExit('Bounded management file size exceeded')
+                      data = file.read_bytes()
+                      result[name] = {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data), 'writable': os.access(file, os.W_OK)}
+                  resolved = output('node', '-e', "const{createRequire}=require('module');const fs=require('fs');const r=createRequire(process.argv[1]);const p=r.resolve('@ai-security-tool/managed-access/package.json');console.log(JSON.stringify({package:p,version:JSON.parse(fs.readFileSync(p)).version,server:r.resolve('@ai-security-tool/managed-access/server')}))", str(script))
+                  sdk = json.loads(resolved)
+                  sdk['parentWritable'] = os.access(pathlib.Path(sdk['package']).parent.parent, os.W_OK)
+                  result['sdkResolution'] = sdk
+              except PermissionError:
+                  result['codeStatus'] = 'Read permission denied'
+              except FileNotFoundError:
+                  result['codeStatus'] = 'Declared path missing or inaccessible'
+          privileges = subprocess.run(['sudo', '-n', '-l'], text=True, capture_output=True, timeout=15)
+          allowed = privileges.stdout if privileges.returncode == 0 else ''
+          result['sudoListingAvailable'] = privileges.returncode == 0
+          result['canRestartExactUnitProven'] = any(line.strip().endswith('/usr/bin/systemctl restart ' + unit) and 'NOPASSWD:' in line and '!' not in line for line in allowed.splitlines())
+          print(json.dumps(result, sort_keys=True))
+          PY
