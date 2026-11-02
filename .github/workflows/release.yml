@@ -7,6 +7,7 @@ on:
     - 'v*'
     - '!v5.7.24'
     - '!v5.7.25'
+    - '!v5.7.26'
   workflow_dispatch:
     inputs:
       publish:
@@ -14,7 +15,7 @@ on:
         type: boolean
         default: false
       windows_installer_only:
-        description: For v5.7.24/v5.7.25 only, build the Windows x64 NSIS installer and skip self-hosted deployment
+        description: For v5.7.24/v5.7.25/v5.7.26 only, build the Windows x64 NSIS installer and skip self-hosted deployment
         type: boolean
         default: false
 
@@ -72,14 +73,14 @@ jobs:
         WINDOWS_INSTALLER_ONLY: ${{ inputs.windows_installer_only }}
       run: |
         case "$TAG" in
-          v5.7.24|v5.7.25)
+          v5.7.24|v5.7.25|v5.7.26)
             if [ "$WINDOWS_INSTALLER_ONLY" != "true" ]; then
               echo "::error::$TAG is an installer-only release; set windows_installer_only=true"
               exit 1
             fi ;;
           *)
             if [ "$WINDOWS_INSTALLER_ONLY" = "true" ]; then
-              echo "::error::windows_installer_only is reserved for v5.7.24/v5.7.25"
+              echo "::error::windows_installer_only is reserved for v5.7.24/v5.7.25/v5.7.26"
               exit 1
             fi ;;
         esac
@@ -188,7 +189,7 @@ jobs:
         fi
 
   publish-self-hosted:
-    if: ${{ vars.ANUBIS_AUTO_SELF_HOSTED_PUBLISH == 'true' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_name != 'v5.7.24' && github.ref_name != 'v5.7.25' && !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
+    if: ${{ vars.ANUBIS_AUTO_SELF_HOSTED_PUBLISH == 'true' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_name != 'v5.7.24' && github.ref_name != 'v5.7.25' && github.ref_name != 'v5.7.26' && !(github.event_name == 'workflow_dispatch' && inputs.windows_installer_only) }}
     needs: release
     permissions:
       contents: read

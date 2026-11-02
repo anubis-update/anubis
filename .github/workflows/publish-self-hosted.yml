@@ -23,7 +23,7 @@ on:
         default: false
         type: boolean
       windows_installer_only:
-        description: 'Allow installer-only feed promotion for v5.7.24/v5.7.25 after explicit authorization'
+        description: 'Allow installer-only feed promotion for v5.7.24/v5.7.25/v5.7.26 after explicit authorization'
         required: false
         default: false
         type: boolean
@@ -70,14 +70,14 @@ jobs:
       run: |
         set -euo pipefail
         [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Stable release tag required"; exit 1; }
-        if [[ "$TAG" == "v5.7.24" || "$TAG" == "v5.7.25" ]]; then
+        if [[ "$TAG" == "v5.7.24" || "$TAG" == "v5.7.25" || "$TAG" == "v5.7.26" ]]; then
           [[ "$WINDOWS_INSTALLER_ONLY" == "true" && "$WINDOWS_MACHINE_HOST" == "true" ]] || {
             echo "::error::$TAG feed promotion requires the explicit installer-only and machine-host inputs"
             exit 1
           }
         else
           [[ "$WINDOWS_INSTALLER_ONLY" != "true" ]] || {
-            echo "::error::windows_installer_only is reserved for v5.7.24/v5.7.25"
+            echo "::error::windows_installer_only is reserved for v5.7.24/v5.7.25/v5.7.26"
             exit 1
           }
         fi

@@ -59,6 +59,15 @@ Manual `publish-self-hosted` runs accept an already published stable tag, includ
 an older tag for rollback. Prereleases do not change the stable update channel.
 Existing clients do not automatically downgrade.
 
+Installer-only v5.7.24, v5.7.25 and v5.7.26 are excluded from tag-triggered
+multi-platform release and automatic self-hosted promotion. Their explicitly
+requested Windows-only publication requires machine-host acceptance.
+`publish-self-hosted` with `stage_only=true`, `windows_installer_only=true` and
+`windows_machine_host=true` verifies a draft release and stages its exact assets
+without writing update metadata. Stable promotion remains a separate operation.
+Verify the existing release webhook's ordering before undrafting: a `published`
+webhook can also write stable metadata. Staging alone does not suspend that hook.
+
 ## Repository secrets
 
 | Secret | Meaning |
