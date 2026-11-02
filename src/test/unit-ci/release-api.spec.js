@@ -89,7 +89,7 @@ test('unpublished events, drafts and prereleases are ignored', async t => {
   assert.equal(fs.existsSync(f.releaseFile), false)
 })
 
-test('explicit installer-only tags never write before or after verified promotion, regardless of body or assets', async t => {
+test('explicit v5.7.26 never writes before or after verified promotion, regardless of body or assets', async t => {
   const f = await fixture(t)
   fs.mkdirSync(path.dirname(f.releaseFile), { recursive: true })
   const stable = {
@@ -128,7 +128,7 @@ test('explicit installer-only tags never write before or after verified promotio
       publishUpdate(f.releaseFile, f.updateDir)
     }
     const previous = snapshot()
-    for (const tag of ['v5.7.24', 'v5.7.25', 'v5.7.26']) {
+    for (const tag of ['v5.7.26']) {
       for (const metadata of [
         {},
         { body: null, assets: null },
@@ -143,6 +143,18 @@ test('explicit installer-only tags never write before or after verified promotio
         assertUnchanged(previous)
       }
     }
+  }
+})
+
+test('neighboring and noncanonical tag spellings retain the existing webhook path', async t => {
+  const f = await fixture(t)
+  for (const tag of ['v5.7.24', 'v5.7.25', 'v5.7.27', '5.7.26', 'v5.7.260']) {
+    const payload = { ...event, release: { ...event.release, tag_name: tag } }
+    const response = await f.send(payload)
+    assert.equal(response.status, 200)
+    assert.equal(await response.text(), 'ok')
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.releaseFile)), payload)
+    assert.equal(fs.readFileSync(path.join(f.updateDir, 'version.html'), 'utf8'), tag + '\n')
   }
 })
 
