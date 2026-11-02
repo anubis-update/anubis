@@ -65,7 +65,8 @@ requested Windows-only publication requires machine-host acceptance.
 `publish-self-hosted` with `stage_only=true`, `windows_installer_only=true` and
 `windows_machine_host=true` verifies a draft release and stages its exact assets
 without writing update metadata. Stable promotion remains a separate operation.
-The release webhook acknowledges exact tag `v5.7.26` without
+The release webhook acknowledges exact version `5.7.26` (with the existing
+optional `v` tag prefix) without
 writing its release file or any stable metadata, even if notes/assets are missing
 or a delivery is retried after promotion. Its only metadata writer is explicit
 verified self-hosted promotion. Deploy and verify this webhook contract before

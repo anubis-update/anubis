@@ -83,7 +83,7 @@ function createServer ({
       if (payload.action !== 'published' || !payload.release || payload.release.draft || payload.release.prerelease) {
         return reply(200, 'no')
       }
-      if (payload.release.tag_name === 'v5.7.26') {
+      if (/^v?5\.7\.26$/.test(payload.release.tag_name)) {
         return reply(200, 'explicit promotion required')
       }
       const temporary = releaseFile + '.' + crypto.randomBytes(8).toString('hex') + '.tmp'
