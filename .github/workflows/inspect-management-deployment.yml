@@ -44,8 +44,9 @@ jobs:
           executable = re.search(r'(?:^|[ {;])path=([^ ;}]+)', raw)
           if executable and re.fullmatch(r'/[A-Za-z0-9_./-]+', executable[1]):
               result['executablePath'] = executable[1]
-          candidates = re.findall(r'(?<![A-Za-z0-9_$/{-])([A-Za-z0-9_./-]*management-api\.js)(?=[\s\'";}]|$)', raw)
-          if len(set(candidates)) == 1 and cwd.is_absolute():
+          candidates = re.findall(r'(?<![A-Za-z0-9_$/{-])([A-Za-z0-9_./-]+\.js)(?=[\s\'";}]|$)', raw)
+          result['declaredJavaScriptPaths'] = sorted(set(candidates))
+          if len(set(candidates)) == 1 and (pathlib.Path(candidates[0]).is_absolute() or cwd.is_absolute()):
               script = pathlib.Path(candidates[0])
               if not script.is_absolute():
                   script = cwd / script
@@ -57,6 +58,9 @@ jobs:
                   result['parentWritable'] = os.access(script.parent, os.W_OK)
                   for name in ['management-api.js', 'management-dashboard.html']:
                       file = script.parent / name
+                      if not file.exists():
+                          result[name] = {'status': 'Not present alongside actual entrypoint'}
+                          continue
                       if file.stat().st_size > 2097152:
                           raise SystemExit('Bounded management file size exceeded')
                       data = file.read_bytes()
