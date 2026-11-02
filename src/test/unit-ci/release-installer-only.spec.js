@@ -36,6 +36,7 @@ test('installer-only feed promotion requires explicit machine-host acceptance fo
 test('draft CDN staging is explicit and cannot expose update metadata', () => {
   const publish = workflow('publish-self-hosted.yml')
   assert.equal(publish.on.workflow_dispatch.inputs.stage_only.default, false)
+  assert.equal(publish.jobs.publish.permissions.contents, 'write')
   const steps = publish.jobs.publish.steps
   const guard = steps.find(step => step.name === 'Validate restricted deployment configuration')
   assert.match(guard.run, /STAGE_ONLY" == "true"/)

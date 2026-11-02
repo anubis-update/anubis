@@ -43,6 +43,9 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    # GitHub requires repository push permission even to read a draft release.
+    permissions:
+      contents: write
     env:
       TAG: ${{ inputs.tag }}
       WINDOWS_MACHINE_HOST: ${{ inputs.windows_machine_host }}
