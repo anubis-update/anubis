@@ -6,6 +6,7 @@ const { join, resolve, dirname, basename } = require('path')
 const { createHash } = require('crypto')
 const http = require('http')
 const { spawn } = require('child_process')
+const { DatabaseSync } = require('node:sqlite')
 const { _electron: electron } = require('playwright')
 const {
   startTestSshServer, stopTestSshServer, HOST_KEY_PUBLIC, TEST_USERNAME, TEST_PASSWORD
@@ -26,6 +27,17 @@ test('packaged Windows desktop functionality', { timeout: 180000 }, async t => {
   const remoteFiles = join(root, 'remote')
   for (const dir of [home, data, userData, remoteFiles]) {
     mkdirSync(dir, { recursive: true })
+  }
+  const allowMultiInstance = process.env.ANUBIS_SMOKE_ALLOW_MULTI_INSTANCE === '1'
+  if (allowMultiInstance) {
+    const databaseDirectory = join(data, 'users', 'default_user')
+    mkdirSync(databaseDirectory, { recursive: true })
+    const database = new DatabaseSync(join(databaseDirectory, 'electerm_data.db'))
+    database.exec('CREATE TABLE data (_id TEXT PRIMARY KEY, data TEXT)')
+    for (const id of ['userConfigNoEncrypt', 'userConfig']) {
+      database.prepare('INSERT INTO data VALUES (?, ?)').run(id, JSON.stringify({ allowMultiInstance: true }))
+    }
+    database.close()
   }
   const markerFile = 'anubis-smoke-file.txt'
   writeFileSync(join(home, markerFile), 'local file manager fixture')
@@ -55,6 +67,7 @@ test('packaged Windows desktop functionality', { timeout: 180000 }, async t => {
         NODE_TEST: '',
         DATA_PATH: dataPath,
         ANUBIS_ADMIN_AUTOSTART: '0',
+        ANUBIS_ADMIN_AI_LOCK: '1',
         ANUBIS_ADMIN_MANAGED_ENABLED: '0',
         ANUBIS_ADMIN_ERROR_REPORT: '0'
       },
@@ -184,7 +197,9 @@ test('packaged Windows desktop functionality', { timeout: 180000 }, async t => {
     await page.locator('.session-current .term-sftp-tabs .type-tab').nth(1).click()
     await page.locator('.session-current .sftp-remote-section').getByText(markerFile, { exact: true }).first().waitFor()
   })
-  await t.test('branded deep links reach the running instance once and connect to SSH', async () => {
+  await t.test('branded deep links reach the running instance once and connect to SSH', {
+    skip: allowMultiInstance ? 'Requires exclusive ownership of the global instance pipe' : false
+  }, async () => {
     const before = await page.evaluate(() => window.store.tabs.length)
     const link = `anubis://${encodeURIComponent(TEST_USERNAME)}:${encodeURIComponent(TEST_PASSWORD)}@127.0.0.1:${port}?title=Anubis%20deep%20link%20smoke&useSshAgent=false`
     await new Promise((resolve, reject) => {

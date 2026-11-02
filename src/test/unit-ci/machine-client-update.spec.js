@@ -81,6 +81,7 @@ async function fixture (t, options = {}) {
     notify: value => events.push(value),
     async fetcher (_url, config) {
       assert.equal(config.redirect, 'error')
+      if (options.fetcher) return options.fetcher(config)
       return new Response(options.body ?? body, { status: options.status || 200 })
     },
     async prepare (file, actual) {
@@ -139,4 +140,120 @@ test('native protected-copy or UAC/launch failures remain explicit and retain th
     assert.equal(f.discarded(), options.launchError ? 1 : 0)
     assert.deepEqual(fs.readdirSync(f.root), [])
   }
+})
+
+function downloadClock (t) {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(AbortSignal, 'timeout', delay => {
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), delay)
+    return controller.signal
+  })
+}
+
+test('a continuing slow download can exceed five minutes and still pass all integrity checks', async t => {
+  downloadClock(t)
+  let elapsed = 0
+  const f = await fixture(t, {
+    fetcher: () => new Response(new ReadableStream({
+      async pull (controller) {
+        await new Promise(resolve => setImmediate(resolve))
+        t.mock.timers.tick(45000)
+        const offset = elapsed / 45000 * 1024
+        elapsed += 45000
+        if (offset < body.length) controller.enqueue(body.subarray(offset, offset + 1024))
+        else controller.close()
+      }
+    }))
+  })
+  await f.run()
+  assert.ok(elapsed > 300000)
+  assert.equal(f.prepared(), 1)
+  assert.equal(f.launched(), 1)
+  assert.deepEqual(fs.readdirSync(f.root), [])
+})
+
+test('stalled headers and stalled bodies abort after two idle minutes and remove temporary files', async t => {
+  downloadClock(t)
+  for (const headers of [true, false]) {
+    let downloadSignal
+    let started
+    const downloadStarted = new Promise(resolve => { started = resolve })
+    let cancelled = false
+    const f = await fixture(t, {
+      fetcher: ({ signal }) => {
+        downloadSignal = signal
+        started()
+        if (headers) {
+          return new Promise((resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+          })
+        }
+        return new Response(new ReadableStream({
+          start (controller) { controller.enqueue(body.subarray(0, 1024)) },
+          cancel () { cancelled = true }
+        }))
+      }
+    })
+    const running = f.run()
+    const rejected = assert.rejects(running, { code: 'ERR_HOST_UPDATE_DOWNLOAD' })
+    await downloadStarted
+    await new Promise(resolve => setImmediate(resolve))
+    t.mock.timers.tick(119999)
+    assert.equal(downloadSignal.aborted, false)
+    t.mock.timers.tick(1)
+    await rejected
+    assert.equal(downloadSignal.aborted, true)
+    if (!headers) assert.equal(cancelled, true)
+    assert.equal(f.prepared(), 0)
+    assert.equal(f.launched(), 0)
+    assert.deepEqual(fs.readdirSync(f.root), [])
+  }
+})
+
+test('caller cancellation interrupts an in-flight download and clears the idle timer', async t => {
+  downloadClock(t)
+  const controller = new AbortController()
+  let downloadSignal
+  let started
+  const downloadStarted = new Promise(resolve => { started = resolve })
+  const f = await fixture(t, {
+    signal: controller.signal,
+    fetcher: ({ signal }) => {
+      downloadSignal = signal
+      started()
+      return new Response(new ReadableStream({ start () {} }))
+    }
+  })
+  const running = f.run()
+  const rejected = assert.rejects(running, { code: 'ERR_HOST_UPDATE_DOWNLOAD' })
+  await downloadStarted
+  controller.abort()
+  await rejected
+  assert.equal(downloadSignal.aborted, true)
+  assert.equal(f.prepared(), 0)
+  assert.equal(f.launched(), 0)
+  assert.deepEqual(fs.readdirSync(f.root), [])
+})
+
+test('continuous progress is still bounded by a two-hour total download deadline', async t => {
+  downloadClock(t)
+  let offset = 0
+  let elapsed = 0
+  const f = await fixture(t, {
+    fetcher: () => new Response(new ReadableStream({
+      async pull (controller) {
+        await new Promise(resolve => setImmediate(resolve))
+        elapsed += 45000
+        t.mock.timers.tick(45000)
+        if (offset < body.length) controller.enqueue(body.subarray(offset, offset += 32))
+        else controller.close()
+      }
+    }))
+  })
+  await assert.rejects(f.run(), { code: 'ERR_HOST_UPDATE_DOWNLOAD' })
+  assert.ok(elapsed >= 2 * 60 * 60 * 1000)
+  assert.equal(f.prepared(), 0)
+  assert.equal(f.launched(), 0)
+  assert.deepEqual(fs.readdirSync(f.root), [])
 })

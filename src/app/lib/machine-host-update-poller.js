@@ -22,7 +22,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { checkMachineUpdate, installMachineUpdate } = require('./machine-client-update')
 const {
-  prepareWindowsUpdate, discardPreparedWindowsUpdate, launchPreparedWindowsUpdate
+  prepareWindowsUpdate, discardPreparedWindowsUpdate, launchServiceWindowsUpdate
 } = require('./windows-host-client')
 
 const FIRST_DELAY_MIN = 2 * 60 * 1000 // first check 2-5 min after ready
@@ -93,7 +93,7 @@ function createMachineUpdatePoller (options) {
     install = installMachineUpdate,
     prepare = (file, update) => prepareWindowsUpdate(helper, serviceName, file, update),
     discard = file => discardPreparedWindowsUpdate(file, serviceName),
-    launch = file => launchPreparedWindowsUpdate(file, { silent: true })
+    launch = (file, update) => launchServiceWindowsUpdate(helper, serviceName, file, update)
   } = options
 
   const stateFile = path.join(dataDir, STATE_FILE)
@@ -111,8 +111,10 @@ function createMachineUpdatePoller (options) {
   const writeState = state => {
     try {
       fs.writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 })
+      return true
     } catch (error) {
       log.error('machine auto-update state write failed', error.code || 'ERR_STATE_WRITE')
+      return false
     }
   }
 
@@ -162,7 +164,19 @@ function createMachineUpdatePoller (options) {
       // leave an auditable trace; routine "no update" cycles stay at debug.
       log.warn('machine auto-update: installing', update.version)
       try {
-        await install(update, { tempDir, prepare, discard, launch, notify, signal })
+        await install(update, {
+          tempDir,
+          prepare,
+          discard,
+          async launch (file, update) {
+            if (!writeState({ ...state, target: update.version, launchedVersion: update.version })) {
+              throw Object.assign(new Error('Cannot persist update launch'), { code: 'ERR_HOST_UPDATE_LAUNCH' })
+            }
+            return launch(file, update)
+          },
+          notify,
+          signal
+        })
       } catch (error) {
         writeState(recordFailure(state, update.version, now()))
         log.error('machine auto-update failed', error.code || 'ERR_HOST_UPDATE_FAILED')

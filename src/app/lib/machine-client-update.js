@@ -5,6 +5,8 @@ const { Readable, Transform } = require('node:stream')
 const { pipeline } = require('node:stream/promises')
 
 const maxInstallerSize = 2 * 1024 ** 3
+const downloadTimeout = 2 * 60 * 60 * 1000
+const downloadIdleTimeout = 2 * 60 * 1000
 const errorCodes = new Set([
   'VERSION', 'URL', 'METADATA', 'COMPATIBILITY', 'INTEGRITY', 'DISABLED',
   'DOWNLOAD', 'PREPARE', 'LAUNCH', 'CLEANUP'
@@ -105,10 +107,21 @@ async function installMachineUpdate (update, {
   let failure
   let protectedFile
   let cleaned = false
+  let idleTimer
   try {
+    const idle = new AbortController()
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => idle.abort(), downloadIdleTimeout)
+    }
+    const downloadSignal = AbortSignal.any([
+      signal, idle.signal, AbortSignal.timeout(downloadTimeout)
+    ].filter(Boolean))
+    resetIdleTimer()
+    downloadSignal.throwIfAborted()
     const response = await fetcher(update.url, {
       redirect: 'error',
-      signal: AbortSignal.any([signal, AbortSignal.timeout(300000)].filter(Boolean))
+      signal: downloadSignal
     })
     if (!response.ok || !response.body) throw updateError('ERR_HOST_UPDATE_DOWNLOAD')
     const file = path.join(dir, update.name)
@@ -117,6 +130,7 @@ async function installMachineUpdate (update, {
     let percent = -1
     const meter = new Transform({
       transform (chunk, _encoding, done) {
+        resetIdleTimer()
         size += chunk.length
         if (size > update.size) return done(updateError('ERR_HOST_UPDATE_INTEGRITY'))
         hash.update(chunk)
@@ -128,7 +142,8 @@ async function installMachineUpdate (update, {
         done(null, chunk)
       }
     })
-    await pipeline(Readable.fromWeb(response.body), meter, fs.createWriteStream(file, { flags: 'wx' }), { signal })
+    await pipeline(Readable.fromWeb(response.body), meter, fs.createWriteStream(file, { flags: 'wx' }), { signal: downloadSignal })
+    clearTimeout(idleTimer)
     if (size !== update.size || hash.digest('hex') !== update.sha256) {
       throw updateError('ERR_HOST_UPDATE_INTEGRITY')
     }
@@ -142,9 +157,11 @@ async function installMachineUpdate (update, {
     cleaned = true
     phase = 'LAUNCH'
     notify({ phase: 'launch' })
-    await launch(protectedFile)
+    await launch(protectedFile, update)
   } catch (error) {
     failure = errorCodes.has(error.code) ? error : updateError('ERR_HOST_UPDATE_' + phase)
+  } finally {
+    clearTimeout(idleTimer)
   }
   try {
     if (!cleaned) await fs.promises.rm(dir, { recursive: true, force: true })

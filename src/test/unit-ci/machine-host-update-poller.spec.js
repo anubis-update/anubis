@@ -123,12 +123,56 @@ test('cycle records a backoff failure and reschedules when install throws', asyn
     check: async () => ({ available: true, version: '5.7.10' }),
     install: async () => { throw Object.assign(new Error('x'), { code: 'ERR_HOST_UPDATE_DOWNLOAD' }) }
   })
+
   await poller.cycle()
   const state = stateOf(dir)
   assert.equal(state.target, '5.7.10')
   assert.equal(state.failureCount, 1)
   assert.equal(state.nextEligibleTime, 1000 + 15 * MIN)
   assert.equal(timers.length, 1) // rescheduled for a later retry
+})
+
+test('launch intent is persisted before the independent installer can stop the runtime', async t => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const update = { available: true, version: '5.7.10', size: 123, sha256: 'a'.repeat(64) }
+  let launched = false
+  const { poller } = makePoller({
+    dataDir: dir,
+    check: async () => update,
+    install: async (value, options) => options.launch('protected.exe', value),
+    launch: async (file, value) => {
+      assert.equal(file, 'protected.exe')
+      assert.equal(value, update)
+      assert.equal(stateOf(dir).launchedVersion, update.version)
+      assert.equal(stateOf(dir).target, update.version)
+      launched = true
+    }
+  })
+  await poller.cycle()
+  assert.equal(launched, true)
+})
+
+test('a failed launch-state write never starts an independent installer', async t => {
+  const dir = tempDir()
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'machine-update-state.json'))
+  let launched = false
+  let code
+  const { poller } = makePoller({
+    dataDir: dir,
+    check: async () => ({ available: true, version: '5.7.10' }),
+    install: async (value, options) => {
+      try { await options.launch('protected.exe', value) } catch (error) {
+        code = error.code
+        throw error
+      }
+    },
+    launch: () => { launched = true }
+  })
+  await poller.cycle()
+  assert.equal(launched, false)
+  assert.equal(code, 'ERR_HOST_UPDATE_LAUNCH')
 })
 
 test('a silently ineffective install is scored as a failure and stops after the cap', async () => {

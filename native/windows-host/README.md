@@ -371,6 +371,48 @@ unit tests do not establish that product behavior.
 
 ### Protected downloaded-installer staging
 
+The JavaScript machine updater allows up to two hours for the complete download
+and aborts after two minutes without incoming data (including response headers).
+Each received chunk resets only the idle deadline, not the total deadline.
+This permits a 136 MB installer to arrive over a slow connection without the
+former five-minute total cutoff. Cancellation and either deadline abort both
+the request and file pipeline; partial downloads are removed and never staged.
+Pinned HTTPS origin, redirect rejection, exact byte size and SHA256 checks are
+unchanged. A timeout is reported as `ERR_HOST_UPDATE_DOWNLOAD` and remains
+subject to the poller's persisted backoff and three-failure cap.
+
+These are download guarantees, not installation success. A running interactive
+GUI may still prevent replacement; do not terminate user sessions to clear it.
+Installed older versions need an approved bootstrap to receive this change.
+
+The SYSTEM poller persists its launch intent before requesting the native
+broker's `launch-update` operation. The authenticated SCM service revalidates
+the exact service-scoped protected path, owner/DACL, size and SHA256 while holding
+a non-writable/non-replaceable file handle, then creates only
+`installer.exe --silent` suspended outside the runtime's job. The broker writes
+the PID reply and an audit log before resuming the installer. A failed reply
+write, audit-write failure or service cancellation before resume cancels the
+still-suspended process without executing it. Requests cannot supply extra
+arguments, environment variables or an arbitrary executable. The ordinary GUI launch path
+is unchanged. Node's `detached: true` alone does **not** escape a Windows job:
+closing the runtime's kill-on-close job also kills that detached descendant.
+Native tests demonstrate both the old detached-child termination and the
+broker-owned test installer's survival when the runtime job closes.
+An RPC acknowledgement is still not installation success or guaranteed browser
+receipt: the installer may immediately stop the requesting runtime. The
+persisted launch intent and host audit log survive that disconnect. Existing
+installer abort recovery remains responsible for restarting a stopped service;
+replacement, rollback and return-online acceptance require an installed canary.
+
+On a shared Windows test host, an existing desktop may own the global
+`anubis-instance-lock` pipe. Set `ANUBIS_SMOKE_ALLOW_MULTI_INSTANCE=1` when running
+`npm run test-packaged-windows` to seed only the temporary test profiles for
+multi-instance operation. This explicitly skips the secondary-instance deep-link
+test, which requires exclusive ownership of that pipe; it does not stop or change
+the existing desktop. All other packaged assertions remain enabled. The policy
+test explicitly sets `ANUBIS_ADMIN_AI_LOCK=1`, since AI settings are otherwise
+user-configurable. Do not report the excluded test as passed.
+
 An already elevated administrator runs the **installed** helper:
 
 ```powershell

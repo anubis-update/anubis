@@ -19,16 +19,17 @@ import (
 )
 
 type request struct {
-	Version     int     `json:"version"`
-	Operation   string  `json:"operation"`
-	Target      string  `json:"target,omitempty"`
-	SessionID   *uint32 `json:"sessionId,omitempty"`
-	AccountSID  string  `json:"accountSid,omitempty"`
-	LogonSID    string  `json:"logonSid,omitempty"`
-	ContextID   string  `json:"contextId,omitempty"`
-	AdmissionID string  `json:"admissionId,omitempty"`
-	OldPassword *string `json:"oldPassword,omitempty"`
-	NewPassword *string `json:"newPassword,omitempty"`
+	Version     int             `json:"version"`
+	Operation   string          `json:"operation"`
+	Target      string          `json:"target,omitempty"`
+	SessionID   *uint32         `json:"sessionId,omitempty"`
+	AccountSID  string          `json:"accountSid,omitempty"`
+	LogonSID    string          `json:"logonSid,omitempty"`
+	ContextID   string          `json:"contextId,omitempty"`
+	AdmissionID string          `json:"admissionId,omitempty"`
+	OldPassword *string         `json:"oldPassword,omitempty"`
+	NewPassword *string         `json:"newPassword,omitempty"`
+	Update      *preparedUpdate `json:"update,omitempty"`
 }
 
 type response struct {
@@ -128,12 +129,25 @@ func decodeRequest(raw []byte) (request, error) {
 		return req, errors.New("unsupported broker version")
 	}
 	if nativePasswordOperation(req.Operation) {
+		if req.Update != nil {
+			return req, errors.New("unexpected update")
+		}
 		return req, validatePasswordRequest(raw, req)
 	}
 	if len(raw) > 8192 || req.AdmissionID != "" || req.OldPassword != nil || req.NewPassword != nil {
 		return req, errors.New("unexpected or oversized broker request")
 	}
+	if req.Operation != "launch-update" && req.Update != nil {
+		return req, errors.New("unexpected update")
+	}
 	switch req.Operation {
+	case "launch-update":
+		if req.Update == nil || req.Target != "" || req.SessionID != nil || req.AccountSID != "" || req.LogonSID != "" || req.ContextID != "" {
+			return req, errors.New("launch-update requires only a protected update")
+		}
+		if err := (updateRequest{Name: "AnubisHost", SourceFile: req.Update.Path, SHA256: req.Update.SHA256, Size: req.Update.Size}).validate(); err != nil {
+			return req, err
+		}
 	case "identity", "list-sessions", "list-contexts":
 		if req.Target != "" || req.SessionID != nil || req.AccountSID != "" || req.LogonSID != "" || req.ContextID != "" {
 			return req, errors.New("unexpected target/sessionId")
@@ -169,6 +183,28 @@ func decodeRequest(raw []byte) (request, error) {
 
 func (b *broker) dispatch(ctx context.Context, req request, caller *authenticatedCaller) (any, error) {
 	switch req.Operation {
+	case "launch-update":
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.stopping {
+			return nil, errors.New("service is stopping")
+		}
+		root, err := dataDir(b.config.ServiceName)
+		if err != nil {
+			return nil, err
+		}
+		var launch *updateLaunch
+		_, err = launchStagedUpdate(root, *req.Update, func(file string) (uint32, error) {
+			launch, err = prepareIndependentUpdate(file)
+			if err != nil {
+				return 0, err
+			}
+			return launch.PID, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return launch, nil
 	case "native-password-update":
 		return b.updateNativePassword(ctx, req, caller)
 	case "redeem-native-password":
@@ -378,12 +414,34 @@ func (b *broker) serve(ctx context.Context, listener net.Listener) error {
 					}
 				}
 			}
-			if err := json.NewEncoder(conn).Encode(reply); err != nil {
+			launch, launching := reply.Result.(*updateLaunch)
+			if launching {
+				if err := finishUpdateLaunch(ctx, conn, b.logger, launch); err != nil {
+					b.logger.Printf("independent update launch pid=%d: %v", launch.PID, err)
+				}
+			} else if err := json.NewEncoder(conn).Encode(reply); err != nil {
 				b.logger.Printf("broker reply write: %v", err)
 			}
 			reqSecretsClear(&reply)
 		}()
 	}
+}
+
+func finishUpdateLaunch(ctx context.Context, writer io.Writer, logger *log.Logger, launch *updateLaunch) (err error) {
+	defer func() { err = errors.Join(err, launch.close()) }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := logger.Output(2, fmt.Sprintf("independent update prepared suspended pid=%d; writing reply before resume", launch.PID)); err != nil {
+		return fmt.Errorf("write update launch audit: %w", err)
+	}
+	if err := json.NewEncoder(writer).Encode(response{Version: 1, OK: true, Result: launch}); err != nil {
+		return fmt.Errorf("write update launch reply: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return launch.resume()
 }
 
 func (b *broker) stopContexts() {

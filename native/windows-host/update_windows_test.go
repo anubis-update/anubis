@@ -2,21 +2,245 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "--silent" {
+		if marker := os.Getenv("ANUBIS_QA_UPDATE_MARKER"); marker != "" {
+			if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
+				os.Exit(2)
+			}
+			time.Sleep(time.Minute)
+			os.Exit(0)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+type updateReplyWriter func([]byte) (int, error)
+
+func (w updateReplyWriter) Write(p []byte) (int, error) { return w(p) }
+
+func TestUpdateReplyFailuresAndServiceStopNeverExecuteInstaller(t *testing.T) {
+	for _, scenario := range []string{"reply-failure", "audit-failure", "stopped-before-reply", "stopped-after-reply"} {
+		t.Run(scenario, func(t *testing.T) {
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "started")
+			t.Setenv("ANUBIS_QA_UPDATE_MARKER", marker)
+			launch, err := prepareIndependentUpdate(exe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, launch.PID)
+			if err != nil {
+				launch.close()
+				t.Fatal(err)
+			}
+			defer windows.CloseHandle(handle)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			writer := io.Writer(io.Discard)
+			logger := log.New(io.Discard, "", 0)
+			fail := updateReplyWriter(func([]byte) (int, error) { return 0, io.ErrClosedPipe })
+			switch scenario {
+			case "reply-failure":
+				writer = fail
+			case "audit-failure":
+				logger = log.New(fail, "", 0)
+			case "stopped-before-reply":
+				cancel()
+			case "stopped-after-reply":
+				writer = updateReplyWriter(func(p []byte) (int, error) {
+					cancel()
+					return len(p), nil
+				})
+			}
+			if err := finishUpdateLaunch(ctx, writer, logger, launch); err == nil {
+				t.Fatal("expected cancelled launch")
+			}
+			result, err := windows.WaitForSingleObject(handle, 5000)
+			if err != nil || result != windows.WAIT_OBJECT_0 {
+				t.Fatalf("suspended installer was not cleaned up: %d %v", result, err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unacknowledged or stopped installer executed: %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceUpdateSurvivesRuntimeJobClosure(t *testing.T) {
+	r, root, _ := updateFixture(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.SourceFile, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r.Size, r.SHA256 = int64(len(payload)), hex.EncodeToString(digest[:])
+	update, err := stageUpdate(r, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "started")
+	t.Setenv("ANUBIS_QA_UPDATE_MARKER", marker)
+	runtime := qaChild(t, "grandchild")
+	pid, err := launchStagedUpdate(root, update, func(file string) (uint32, error) {
+		launch, err := prepareIndependentUpdate(file)
+		if err != nil {
+			return 0, err
+		}
+		var reply bytes.Buffer
+		if err := finishUpdateLaunch(context.Background(), &reply, log.New(io.Discard, "", 0), launch); err != nil {
+			return 0, err
+		}
+		var result struct {
+			OK     bool `json:"ok"`
+			Result struct {
+				PID uint32 `json:"pid"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(reply.Bytes(), &result); err != nil || !result.OK || result.Result.PID != launch.PID {
+			t.Fatalf("invalid independent launch reply: %s %v", reply.Bytes(), err)
+		}
+		return launch.PID, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE, false, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	defer windows.TerminateProcess(handle, 0)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("independent test update did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	runtime.close()
+	result, err := windows.WaitForSingleObject(handle, 200)
+	if err != nil || result != uint32(windows.WAIT_TIMEOUT) {
+		t.Fatalf("independent update died with runtime job: result=%d err=%v", result, err)
+	}
+}
+
+func TestUnacknowledgedIndependentUpdateNeverExecutes(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "must-not-start")
+	t.Setenv("ANUBIS_QA_UPDATE_MARKER", marker)
+	launch, err := prepareIndependentUpdate(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("suspended update ran before the broker reply")
+	}
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, launch.PID)
+	if err != nil {
+		launch.close()
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := launch.close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := windows.WaitForSingleObject(handle, 3000)
+	if err != nil || result != windows.WAIT_OBJECT_0 {
+		t.Fatalf("unacknowledged suspended update was not cancelled: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("cancelled update executed")
+	}
+}
+
+func TestLaunchUpdateRevalidatesProtectedPathIntegrityAndACL(t *testing.T) {
+	for _, invalid := range []string{"digest", "size", "unprotected", "other-service", "acl"} {
+		t.Run(invalid, func(t *testing.T) {
+			r, root, _ := updateFixture(t)
+			update, err := stageUpdate(r, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch invalid {
+			case "digest":
+				update.SHA256 = strings.Repeat("0", 64)
+			case "size":
+				update.Size++
+			case "unprotected":
+				update.Path = r.SourceFile
+			case "other-service":
+				root = filepath.Dir(root)
+			case "acl":
+				if err := applyACL(update.Path, "D:P(A;;GA;;;WD)"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			called := false
+			_, err = launchStagedUpdate(root, update, func(string) (uint32, error) {
+				called = true
+				return 123, nil
+			})
+			if err == nil || called {
+				t.Fatalf("unsafe update reached launch: err=%v called=%v", err, called)
+			}
+		})
+	}
+}
+
+func TestLaunchUpdateBrokerRequestIsNarrow(t *testing.T) {
+	valid := `{"version":1,"operation":"launch-update","update":{"path":"C:\\ProgramData\\Anubis\\Host\\AnubisHost\\updates\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\installer.exe","size":123,"sha256":"` + strings.Repeat("a", 64) + `"}}`
+	if _, err := decodeRequest([]byte(valid)); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"version":1,"operation":"launch-update"}`,
+		strings.Replace(valid, `"size":123`, `"size":0`, 1),
+		strings.Replace(valid, `"size":123`, `"size":123,"command":"anything"`, 1),
+		strings.Replace(valid, `"update":`, `"target":"system","update":`, 1),
+		strings.Replace(valid, `"launch-update"`, `"identity"`, 1),
+		strings.Replace(valid, `"launch-update"`, `"native-password-update"`, 1),
+	} {
+		if _, err := decodeRequest([]byte(raw)); err == nil {
+			t.Fatal("accepted an unexpected broker launch shape")
+		}
+	}
+}
 
 func updateFixture(t *testing.T) (updateRequest, string, []byte) {
 	t.Helper()

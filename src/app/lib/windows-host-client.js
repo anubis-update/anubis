@@ -117,6 +117,17 @@ function launchPreparedWindowsUpdate (file, { silent = false } = {}) {
   })
 }
 
+async function launchServiceWindowsUpdate (helper, serviceName, file, update) {
+  if (!isPreparedUpdatePath(file, serviceName)) throw clientError('ERR_HOST_UPDATE_LAUNCH')
+  const result = await requestHost(helper, serviceName, {
+    version: 1,
+    operation: 'launch-update',
+    update: { path: file, size: update.size, sha256: update.sha256 }
+  })
+  if (!Number.isInteger(result?.pid) || result.pid < 1) throw clientError('ERR_HOST_UPDATE_LAUNCH')
+  return result.pid
+}
+
 function validateDescriptor (value, target, expectedSid) {
   const identity = value?.identity
   const endpoint = value?.endpoint
@@ -159,6 +170,7 @@ module.exports = {
   prepareWindowsUpdate,
   discardPreparedWindowsUpdate,
   launchPreparedWindowsUpdate,
+  launchServiceWindowsUpdate,
   validateDescriptor,
   isContextUrl,
   publicContext

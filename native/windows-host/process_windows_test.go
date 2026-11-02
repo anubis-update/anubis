@@ -118,7 +118,19 @@ func TestRuntimeRejectsBroadPipeACL(t *testing.T) {
 }
 
 func TestJobClosureTerminatesOwnedGrandchild(t *testing.T) {
-	ch := qaChild(t, "grandchild")
+	assertGrandchildJobClosure(t, "grandchild")
+}
+
+func TestJobClosureTerminatesNodeDetachedGrandchild(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Fatal("Node is required to verify the updater's detached spawn")
+	}
+	assertGrandchildJobClosure(t, "node-detached-grandchild")
+}
+
+func assertGrandchildJobClosure(t *testing.T, mode string) {
+	t.Helper()
+	ch := qaChild(t, mode)
 	pidFile := filepath.Join(filepath.Dir(ch.readyFile), "grandchild.pid")
 	var raw []byte
 	deadline := time.Now().Add(5 * time.Second)
@@ -195,6 +207,19 @@ func TestChildHelper(t *testing.T) {
 			os.Exit(3)
 		}
 		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	if mode == "node-detached-grandchild" {
+		script := `const fs = require('node:fs'); const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'],
+  { detached: true, stdio: 'ignore', windowsHide: true });
+child.on('error', () => process.exit(2));
+child.on('spawn', () => { fs.writeFileSync(process.argv[1], String(child.pid)); child.unref(); });
+setTimeout(() => {}, 60000);`
+		cmd := exec.Command("node", "-e", script, filepath.Join(dir, "grandchild.pid"))
+		if err := cmd.Run(); err != nil {
+			os.Exit(9)
+		}
 		os.Exit(0)
 	}
 	if mode == "error" {

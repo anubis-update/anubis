@@ -81,6 +81,8 @@ test('transport proof matches only exact loopback HTTP/WebSocket origin, not red
 function updateFixture (result, failed = false) {
   const calls = []
   const child = new EventEmitter()
+  child.stdin = new EventEmitter()
+  child.stdin.end = value => { calls.push({ stdin: value }) }
   child.pid = 1234
   child.unref = () => { calls.push('unref') }
   const output = { exports: {} }
@@ -90,7 +92,8 @@ function updateFixture (result, failed = false) {
     'node:child_process': {
       execFile (file, args, options, callback) {
         calls.push({ file, args, options })
-        callback(failed ? new Error('native error') : null, JSON.stringify(result))
+        queueMicrotask(() => callback(failed ? new Error('native error') : null, JSON.stringify(result)))
+        return child
       },
       spawn (file, args, options) {
         calls.push({ file, args, options })
@@ -142,4 +145,26 @@ test('elevated machine GUI launches the protected installer directly without PAT
   await assert.rejects(updateFixture(null, true).launchPreparedWindowsUpdate('C:\\protected\\installer.exe'), {
     code: 'ERR_HOST_UPDATE_LAUNCH'
   })
+})
+
+test('SYSTEM updater requests a scoped native service launch instead of spawning inside its job', async () => {
+  const file = 'C:\\ProgramData\\Anubis\\Host\\AnubisHost\\updates\\' + 'b'.repeat(32) + '\\installer.exe'
+  const update = { size: 123, sha256: 'a'.repeat(64) }
+  const f = updateFixture({ version: 1, ok: true, result: { pid: 4321 } })
+  assert.equal(await f.launchServiceWindowsUpdate('helper.exe', 'AnubisHost', file, update), 4321)
+  assert.deepEqual(Array.from(f.calls[0].args), ['broker-client', '--name', 'AnubisHost', '--stdio'])
+  assert.deepEqual(JSON.parse(f.calls[1].stdin), {
+    version: 1, operation: 'launch-update', update: { path: file, ...update }
+  })
+  assert.equal(f.calls[0].options.shell, false)
+  for (const invalid of ['C:\\temp\\installer.exe', file.replace('AnubisHost\\', 'AnubisHost-QA-other\\')]) {
+    await assert.rejects(f.launchServiceWindowsUpdate('helper.exe', 'AnubisHost', invalid, update), {
+      code: 'ERR_HOST_UPDATE_LAUNCH'
+    })
+  }
+  for (const result of [{ pid: 0 }, { pid: '4321' }, null]) {
+    await assert.rejects(updateFixture({ version: 1, ok: true, result })
+      .launchServiceWindowsUpdate('helper.exe', 'AnubisHost', file, update), { code: 'ERR_HOST_UPDATE_LAUNCH' })
+  }
+  await assert.rejects(updateFixture(null, true).launchServiceWindowsUpdate('helper.exe', 'AnubisHost', file, update))
 })

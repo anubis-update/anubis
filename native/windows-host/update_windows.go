@@ -447,3 +447,86 @@ func stageUpdate(r updateRequest, root string) (result preparedUpdate, err error
 	}
 	return preparedUpdate{Path: final, Size: count, SHA256: actual}, nil
 }
+
+func launchStagedUpdate(root string, update preparedUpdate, start func(string) (uint32, error)) (uint32, error) {
+	r := updateRequest{Name: "AnubisHost", SourceFile: update.Path, SHA256: update.SHA256, Size: update.Size}
+	if err := r.validate(); err != nil {
+		return 0, err
+	}
+	dir := filepath.Dir(update.Path)
+	if filepath.Base(update.Path) != "installer.exe" || !contextIDPattern.MatchString(filepath.Base(dir)) ||
+		!samePath(filepath.Dir(dir), filepath.Join(root, "updates")) {
+		return 0, errors.New("installer is not a protected update for this service")
+	}
+	if err := localNonReparsePath(root); err != nil {
+		return 0, err
+	}
+	if err := privatePath(root); err != nil {
+		return 0, err
+	}
+	for _, path := range []string{filepath.Join(root, "updates"), dir, update.Path} {
+		if err := updatePathSecurity(path); err != nil {
+			return 0, err
+		}
+	}
+	file, err := openUpdateSource(r)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	count, err := io.Copy(hash, io.LimitReader(file, r.Size+1))
+	if err != nil {
+		return 0, err
+	}
+	if count != r.Size || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), r.SHA256) {
+		return 0, errors.New("protected installer SHA256 or byte size mismatch")
+	}
+	return start(update.Path)
+}
+
+type updateLaunch struct {
+	PID     uint32 `json:"pid"`
+	process windows.Handle
+	thread  windows.Handle
+	resumed bool
+}
+
+func (u *updateLaunch) resume() error {
+	if _, err := windows.ResumeThread(u.thread); err != nil {
+		return err
+	}
+	u.resumed = true
+	return nil
+}
+
+func (u *updateLaunch) close() error {
+	var err error
+	if !u.resumed {
+		err = windows.TerminateProcess(u.process, 1)
+	}
+	return errors.Join(err, windows.CloseHandle(u.thread), windows.CloseHandle(u.process))
+}
+
+// The SCM broker resumes this independent process only after writing its reply.
+func prepareIndependentUpdate(file string) (*updateLaunch, error) {
+	application, err := windows.UTF16PtrFromString(file)
+	if err != nil {
+		return nil, err
+	}
+	command, err := windows.UTF16PtrFromString(windows.ComposeCommandLine([]string{file, "--silent"}))
+	if err != nil {
+		return nil, err
+	}
+	directory, err := windows.UTF16PtrFromString(filepath.Dir(file))
+	if err != nil {
+		return nil, err
+	}
+	startup := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
+	var process windows.ProcessInformation
+	if err := windows.CreateProcess(application, command, nil, nil, false, windows.CREATE_NO_WINDOW|windows.CREATE_SUSPENDED,
+		nil, directory, &startup, &process); err != nil {
+		return nil, err
+	}
+	return &updateLaunch{PID: process.ProcessId, process: process.Process, thread: process.Thread}, nil
+}

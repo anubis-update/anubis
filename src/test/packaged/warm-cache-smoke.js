@@ -1,6 +1,6 @@
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { mkdtempSync, writeFileSync, rmSync } = require('node:fs')
+const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join, dirname, resolve } = require('node:path')
 const http = require('node:http')
@@ -9,6 +9,7 @@ const { _electron: electron } = require('playwright')
 const { snapshotWindowsProtocols } = require('../integration/lib/windows-protocol-fixture')
 const { checkRendererNavigation } = require('./lib/renderer-navigation')
 const { staleEntryFixture } = require('./lib/stale-entry-fixture')
+const { DatabaseSync } = require('node:sqlite')
 
 test('same-version reinstall replaces cached entry modules without losing user data', {
   skip: process.platform !== 'win32',
@@ -23,11 +24,22 @@ test('same-version reinstall replaces cached entry modules without losing user d
   assert.notEqual(stale, entry, 'fixture must change a real reachable-module reference')
   const root = mkdtempSync(join(tmpdir(), 'anubis-warm-cache-'))
   const profile = join(root, 'profile')
+  const data = join(root, 'data')
+  if (process.env.ANUBIS_SMOKE_ALLOW_MULTI_INSTANCE === '1') {
+    const databaseDirectory = join(data, 'users', 'default_user')
+    mkdirSync(databaseDirectory, { recursive: true })
+    const database = new DatabaseSync(join(databaseDirectory, 'electerm_data.db'))
+    database.exec('CREATE TABLE data (_id TEXT PRIMARY KEY, data TEXT)')
+    for (const id of ['userConfigNoEncrypt', 'userConfig']) {
+      database.prepare('INSERT INTO data VALUES (?, ?)').run(id, JSON.stringify({ allowMultiInstance: true }))
+    }
+    database.close()
+  }
   const env = {
     ...process.env,
     NODE_ENV: 'production',
     NODE_TEST: '',
-    DATA_PATH: join(root, 'data'),
+    DATA_PATH: data,
     ANUBIS_ADMIN_AUTOSTART: '0',
     ANUBIS_ADMIN_MANAGED_ENABLED: '0',
     ANUBIS_ADMIN_ERROR_REPORT: '0'
