@@ -5,6 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { createServer } = require('../../../services/release-api')
+const { publishUpdate } = require('../../../services/publish-update')
 
 const secret = 'unit-webhook-signature-key'
 const route = '/github-anubis-api/unit-test'
@@ -86,6 +87,63 @@ test('unpublished events, drafts and prereleases are ignored', async t => {
     assert.equal(await (await f.send(payload)).text(), 'no')
   }
   assert.equal(fs.existsSync(f.releaseFile), false)
+})
+
+test('explicit installer-only tags never write before or after verified promotion, regardless of body or assets', async t => {
+  const f = await fixture(t)
+  fs.mkdirSync(path.dirname(f.releaseFile), { recursive: true })
+  const stable = {
+    ...event,
+    release: {
+      ...event.release,
+      tag_name: 'v5.7.25',
+      assets: [{
+        name: 'anubis-5.7.25-win-x64-installer.exe',
+        size: 10,
+        browser_download_url: 'https://download.anubis.locker/releases/v5.7.25/anubis-5.7.25-win-x64-installer.exe',
+        digest: 'sha256:' + 'a'.repeat(64),
+        windows_machine_host: 1
+      }]
+    }
+  }
+  fs.writeFileSync(f.releaseFile, JSON.stringify(stable))
+  publishUpdate(f.releaseFile, f.updateDir)
+  const files = [
+    f.releaseFile,
+    path.join(f.updateDir, 'version.html'),
+    ...['anubis-release.json', 'anubis-github-release.json'].map(name => path.join(f.updateDir, 'data', name))
+  ]
+  const snapshot = () => files.map(file => fs.readFileSync(file))
+  const assertUnchanged = previous => {
+    for (const [index, bytes] of snapshot().entries()) assert(bytes.equals(previous[index]), files[index])
+    assert.deepEqual(fs.readdirSync(path.dirname(f.releaseFile)).sort(), ['release.json', 'update'])
+  }
+  for (const advertised of ['v5.7.25', 'v5.7.26']) {
+    if (advertised === 'v5.7.26') {
+      const promoted = JSON.parse(JSON.stringify(stable))
+      promoted.release.tag_name = advertised
+      promoted.release.assets[0].name = 'anubis-5.7.26-win-x64-installer.exe'
+      promoted.release.assets[0].browser_download_url = 'https://download.anubis.locker/releases/v5.7.26/anubis-5.7.26-win-x64-installer.exe'
+      fs.writeFileSync(f.releaseFile, JSON.stringify(promoted))
+      publishUpdate(f.releaseFile, f.updateDir)
+    }
+    const previous = snapshot()
+    for (const tag of ['v5.7.24', 'v5.7.25', 'v5.7.26']) {
+      for (const metadata of [
+        {},
+        { body: null, assets: null },
+        { body: '<!-- unknown publication mode -->', assets: [] },
+        { body: 'Notes edited after publication', assets: event.release.assets }
+      ]) {
+        const payload = { ...event, release: { tag_name: tag, ...metadata } }
+        assert.equal((await f.send(payload, '')).status, 401)
+        const response = await f.send(payload)
+        assert.equal(response.status, 200)
+        assert.equal(await response.text(), 'explicit promotion required')
+        assertUnchanged(previous)
+      }
+    }
+  }
 })
 
 test('release API returns HTTP 413 above the 25 MiB request limit without persisting the body', async t => {

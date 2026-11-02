@@ -65,8 +65,12 @@ requested Windows-only publication requires machine-host acceptance.
 `publish-self-hosted` with `stage_only=true`, `windows_installer_only=true` and
 `windows_machine_host=true` verifies a draft release and stages its exact assets
 without writing update metadata. Stable promotion remains a separate operation.
-Verify the existing release webhook's ordering before undrafting: a `published`
-webhook can also write stable metadata. Staging alone does not suspend that hook.
+The release webhook acknowledges these exact installer-only tags without
+writing its release file or any stable metadata, even if notes/assets are missing
+or a delivery is retried after promotion. Their only metadata writer is explicit
+verified self-hosted promotion. Deploy and verify this webhook contract before
+undrafting; an older webhook can still write stable metadata. Staging alone does
+not suspend an older hook, and a final recheck cannot prevent an unsafe interval.
 
 ## Repository secrets
 

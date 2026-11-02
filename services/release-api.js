@@ -83,6 +83,9 @@ function createServer ({
       if (payload.action !== 'published' || !payload.release || payload.release.draft || payload.release.prerelease) {
         return reply(200, 'no')
       }
+      if (['v5.7.24', 'v5.7.25', 'v5.7.26'].includes(payload.release.tag_name)) {
+        return reply(200, 'explicit promotion required')
+      }
       const temporary = releaseFile + '.' + crypto.randomBytes(8).toString('hex') + '.tmp'
       try {
         fs.mkdirSync(path.dirname(releaseFile), { recursive: true })
