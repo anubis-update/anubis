@@ -6,10 +6,10 @@
   },
   "web": {
     "repository": "Anubis-Security-Tool/anubis-web",
-    "commit": "354b871f924d38a32eab19a61b34b4588b05443f"
+    "commit": "e6e27e783cb066e94c9686f74b0d3f640d6cdfa0"
   },
   "sdk": {
     "repository": "Anubis-Security-Tool/anubis-managed-access",
-    "commit": "faa5a58e2ea4491d3a1cb988185a70a7839c7abc"
+    "commit": "fd2eb4b8ca41191db758330497dbc7973f724faf"
   }
 }

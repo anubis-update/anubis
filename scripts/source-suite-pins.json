@@ -3,9 +3,9 @@
   "components": {
     "web": {
       "repository": "https://github.com/Anubis-Security-Tool/anubis-web",
-      "commit": "354b871f924d38a32eab19a61b34b4588b05443f",
+      "commit": "e6e27e783cb066e94c9686f74b0d3f640d6cdfa0",
       "packageName": "anubis-web",
-      "version": "5.7.6"
+      "version": "5.7.26"
     },
     "resource": {
       "repository": "https://github.com/Anubis-Security-Tool/anubis-resource",

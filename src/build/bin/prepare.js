@@ -64,7 +64,8 @@ require('fs').writeFileSync(
 )
 
 cp('.npmrc', 'work/app/.npmrc')
-runChecked('npm i --omit=dev --legacy-peer-deps')
+require('./runtime-lock').stageRuntimeLock(cwd, resolve(cwd, 'work/app'))
+runChecked('npm ci --omit=dev --legacy-peer-deps --no-audit --no-fund')
 notices.captureRuntimeNotices(cwd)
 // yarn autoclean removes dependency folders named assets/images. Stage the
 // complete browser tree outside node_modules before that cleanup runs.

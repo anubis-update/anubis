@@ -13,6 +13,17 @@ SDK source before any platform packager runs.
 Source provenance is written only after preparation succeeds and the application
 entry point, main-process library and runtime package metadata exist.
 
+Runtime preparation uses `npm ci --omit=dev --legacy-peer-deps` with the reviewed
+root lock, retaining dependency install hooks. Only the existing platform-specific
+`node-bash`/`node-powershell` removal is reflected in the staged lock; mismatched
+source/runtime dependencies fail before installation. For prepublication canaries,
+prime npm's content cache with the exact owned SDK/browser-assets tarballs whose
+SHA-512 integrity is recorded in that lock. Record the tarball hashes and source
+commits in the canary receipt. This does not publish the lock's registry URLs:
+offline installation fails if the required bytes are missing or corrupt. After
+publication, the same lock can fetch those exact bytes from the owned registry
+without a private cache.
+
 Builds and updates use `Anubis-Locker/anubis`, our npm registry and our VPS.
 The release workflow does not depend on a separate website repository and does
 not deploy the main website or the public demo.
