@@ -1,5 +1,5 @@
 /**
- * Control Center channel (device side, SPEC-v1 §11). The device dials OUT over
+ * Control Center channel (device side, SPEC-v1 Â§11). The device dials OUT over
  * wss://, authenticates by signing a server challenge with its Ed25519 key,
  * and executes signed `cmd` frames ONLY through api.dispatcher.execute with a
  * 'remote' actor, so local policy / default-deny / audit apply. Confirmations
@@ -54,6 +54,7 @@ function createControlChannel ({
   let evtWindow = { t: 0, n: 0 }
   const inflight = new Map()
   const recent = new Map()
+  const takeover = { on: false, by: null, since: null }
 
   const isKilled = () => state.killed || store.killed()
   const setError = (code) => { state.lastError = code ? String(code).slice(0, 60) : null }
@@ -122,11 +123,16 @@ function createControlChannel ({
       recent.set(id, r)
       return sendRes(id, r)
     }
+    const role = f.role === 'operator' ? 'operator' : 'agent'
+    if (takeover.on && role !== 'operator') {
+      audit(req, 'deny', 'takeover', 'TAKEOVER')
+      return sendFrame({ t: 'ack', v: 1, id, status: 'rejected', error: 'TAKEOVER' })
+    }
     if (inflight.size >= maxInflight) {
       audit(req, 'deny', 'busy', 'BUSY')
       return sendFrame({ t: 'ack', v: 1, id, status: 'rejected', error: 'BUSY', retryAfterMs: 1000 })
     }
-    inflight.set(id, true)
+    inflight.set(id, role)
     sendFrame({ t: 'ack', v: 1, id, status: 'accepted' })
     const timeoutMs = Math.max(100, Math.min(120000, deadline - now()))
     let response
@@ -154,6 +160,18 @@ function createControlChannel ({
   function onCancel (f) {
     if (typeof f.id === 'string' && inflight.has(f.id)) {
       try { api.dispatcher.cancel(f.id, REMOTE_ACTOR) } catch {}
+    }
+  }
+
+  function onTakeover (f) {
+    const on = f.on === true
+    takeover.on = on
+    takeover.by = on ? String(f.by || 'operator').slice(0, 80) : null
+    takeover.since = on ? now() : null
+    if (on) {
+      for (const [id, role] of inflight) {
+        if (role !== 'operator') { try { api.dispatcher.cancel(id, REMOTE_ACTOR) } catch {} }
+      }
     }
   }
 
@@ -273,7 +291,8 @@ function createControlChannel ({
         return fail('BYE_' + String(f.code || '').slice(0, 20), { permanent: revoked, retryAfterMs: Number.isFinite(f.reconnectAfterMs) ? Math.min(f.reconnectAfterMs, 3600000) : undefined })
       }
       case 'cmd':
-      case 'cancel': {
+      case 'cancel':
+      case 'takeover': {
         if (f.sid !== session.id || !U.verify(session.serverKey, U.frameForSig(f), f.sig)) {
           audit({ id: f.id, command: f.command }, 'deny', 'bad-signature', 'UNAUTHENTICATED')
           setError('BAD_SIGNATURE')
@@ -282,6 +301,7 @@ function createControlChannel ({
         if (!Number.isInteger(f.sseq) || f.sseq <= session.lastSseq) return undefined
         session.lastSseq = f.sseq
         if (isKilled()) return undefined
+        if (f.t === 'takeover') return onTakeover(f)
         return f.t === 'cmd' ? onCmd(f) : onCancel(f)
       }
       default: return undefined
@@ -369,6 +389,8 @@ function createControlChannel ({
   function forget () {
     disconnect()
     store.clear()
+    takeover.on = false
+    takeover.by = takeover.since = null
     state.killed = false
     state.status = enabled ? 'idle' : 'disabled'
     return status()
@@ -388,6 +410,7 @@ function createControlChannel ({
       killed: isKilled(),
       attempt: state.attempt,
       inflight: inflight.size,
+      takeover: takeover.on,
       lastError: state.lastError,
       connectedAt: state.connectedAt ? new Date(state.connectedAt).toISOString() : null
     }

@@ -280,3 +280,24 @@ test('loopback: remote events are streamed with secrets scrubbed', { skip: !hasS
     assert.ok(!JSON.stringify(ev).includes('SECRET'))
   } finally { await t.stop() }
 })
+
+test('loopback: takeover rejects agent commands, allows operator, releases', { skip: !hasStub }, async () => {
+  const t = await setup()
+  try {
+    const r = await t.enrolled()
+    assert.equal(t.ch.status().takeover, false)
+    assert.ok(t.cc.setTakeover(r.deviceId, true, 'alice'))
+    assert.ok(await until(() => t.ch.status().takeover === true))
+    const blocked = await t.cc.sendCommand(r.deviceId, { command: 'api.capabilities' })
+    assert.equal(blocked.ok, false)
+    assert.equal(blocked.error.code, 'TAKEOVER')
+    const explicit = await t.cc.sendCommand(r.deviceId, { command: 'api.capabilities', role: 'agent' })
+    assert.equal(explicit.error.code, 'TAKEOVER')
+    const op = await t.cc.sendCommand(r.deviceId, { command: 'api.capabilities', role: 'operator' })
+    assert.equal(op.ok, true, JSON.stringify(op))
+    assert.ok(t.auditRecords().some((x) => x.decision && x.decision.rule === 'takeover'))
+    t.cc.setTakeover(r.deviceId, false)
+    assert.ok(await until(() => t.ch.status().takeover === false))
+    assert.equal((await t.cc.sendCommand(r.deviceId, { command: 'api.capabilities' })).ok, true)
+  } finally { await t.stop() }
+})
