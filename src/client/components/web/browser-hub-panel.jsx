@@ -433,6 +433,7 @@ function BrowserBar ({ status, browserId, setBrowserId, reloadStatus, profileId 
 export default function BrowserHubPanel () {
   const [status, setStatus] = useState(null)
   const [disabled, setDisabled] = useState(false)
+  const [remoteOnly, setRemoteOnly] = useState(false)
   const [browserId, setBrowserId] = useState(null)
   const [profileId, setProfileId] = useState(null)
   const reloadStatus = useCallback(async () => {
@@ -443,12 +444,20 @@ export default function BrowserHubPanel () {
       setBrowserId(cur => (s.browsers.some(b => b.browserId === cur) ? cur : (s.browsers[0] && s.browsers[0].browserId) || null))
     } catch (e) {
       if (e.code === 'DISABLED') setDisabled(true)
+      else if (e.code === 'REMOTE_UNSUPPORTED') setRemoteOnly(true)
       else fail(e)
     }
   }, [])
   useEffect(() => { reloadStatus() }, [reloadStatus])
   useApprover()
 
+  if (remoteOnly) {
+    return (
+      <div className='browser-hub-panel'>
+        <Alert type='info' showIcon message='Browser Hub is available only in the local Anubis app on this PC. Remote Web sessions cannot manage it.' />
+      </div>
+    )
+  }
   if (disabled) {
     return (
       <div className='browser-hub-panel'>

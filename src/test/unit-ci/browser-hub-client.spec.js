@@ -39,6 +39,15 @@ test('real transport: runGlobalAsync("browserHub", action, payload) and unwrap',
   await assert.rejects(hub.status(), { code: 'DISABLED', message: 'off' })
 })
 
+test('managed Web session: unsupported browserHub maps to REMOTE_UNSUPPORTED', async () => {
+  installPre(() => { throw new Error('Unsupported managed browser function: browserHub') })
+  await assert.rejects(hub.status(), { code: 'REMOTE_UNSUPPORTED' })
+})
+
+test('policy.setRule tolerates a missing policy', () => {
+  assert.equal(policy.setRule(null, 'agent', 'tab.open', 'allow'), null)
+})
+
 test('exec wraps command.execute and unwraps the dispatcher envelope', async () => {
   const { calls } = installPre((action, p) => ({
     ok: true,

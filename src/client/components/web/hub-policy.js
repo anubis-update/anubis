@@ -80,6 +80,7 @@ function effectFor (policy, role, command) {
 }
 
 function setRule (policy, role, command, effect) {
+  if (!policy || typeof policy !== 'object') return policy
   const next = JSON.parse(JSON.stringify(policy))
   next.roles = next.roles || {}
   next.roles[role] = next.roles[role] || { firstMatchWins: true, rules: [] }

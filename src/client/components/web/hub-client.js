@@ -222,7 +222,15 @@ async function ipc (action, payload) {
   let res
   const pre = getPre()
   if (pre && !forceMock) {
-    res = await pre.runGlobalAsync('browserHub', action, payload)
+    try {
+      res = await pre.runGlobalAsync('browserHub', action, payload)
+    } catch (e) {
+      // The managed Web session allow-list never exposes browserHub (local-only control surface).
+      if (/Unsupported managed browser function/i.test(String(e && e.message))) {
+        throw hubError('REMOTE_UNSUPPORTED', 'Browser Hub is available only in the local Anubis app on this PC.')
+      }
+      throw e
+    }
   } else {
     const h = mockActions[action]
     if (!h) throw hubError('INVALID_REQUEST', 'Unknown browserHub action')
