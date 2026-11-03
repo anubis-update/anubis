@@ -41,7 +41,7 @@ function parseKey (spec) {
   const main = parts.pop()
   let modifiers = 0
   for (const m of parts) {
-    if (!MODS[m]) throw apiError('INVALID_PARAMS', 'Unknown modifier')
+    if (!MODS[m]) throw apiError('INVALID_REQUEST', 'Unknown modifier')
     modifiers |= MODS[m]
   }
   const named = KEYS[main] || (main === ' ' ? KEYS.Space : null)
@@ -57,7 +57,7 @@ function parseKey (spec) {
       printable: !(modifiers & ~8)
     }
   }
-  throw apiError('INVALID_PARAMS', 'Unknown key')
+  throw apiError('INVALID_REQUEST', 'Unknown key')
 }
 
 function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
@@ -220,7 +220,7 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
 
   async function evaluate (tabId, { expression }) {
     const r = await send(tabId, 'Runtime.evaluate', { expression: String(expression), returnByValue: true, awaitPromise: true })
-    if (r && r.exceptionDetails) throw apiError('EVALUATION_FAILED', 'Script threw an exception')
+    if (r && r.exceptionDetails) throw apiError('INVALID_REQUEST', 'Script threw an exception')
     return { value: r && r.result ? r.result.value : undefined, untrusted: true }
   }
 
