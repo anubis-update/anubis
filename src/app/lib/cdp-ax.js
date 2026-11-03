@@ -151,26 +151,38 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
     }
   }
 
-  async function click (tabId, { ref, snapshotId, button = 'left', clickCount = 1 }) {
-    const entry = resolveRef(tabId, ref, snapshotId)
-    const { x, y } = await locate(tabId, entry)
+  const hasPoint = (t) => Number.isFinite(t.x) && Number.isFinite(t.y) && !t.ref
+
+  async function point (tabId, t) {
+    if (hasPoint(t)) return { x: t.x, y: t.y }
+    return locate(tabId, resolveRef(tabId, t.ref, t.snapshotId))
+  }
+
+  async function click (tabId, { ref, snapshotId, x: px, y: py, button = 'left', clickCount = 1 }) {
+    const { x, y } = await point(tabId, { ref, snapshotId, x: px, y: py })
     await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
     await send(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount })
     await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount })
     return { clicked: true }
   }
 
-  async function hover (tabId, { ref, snapshotId }) {
-    const { x, y } = await locate(tabId, resolveRef(tabId, ref, snapshotId))
+  async function hover (tabId, { ref, snapshotId, x: px, y: py }) {
+    const { x, y } = await point(tabId, { ref, snapshotId, x: px, y: py })
     await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
     return { hovered: true }
   }
 
-  async function type (tabId, { ref, snapshotId, text, clear = false, submit = false }) {
-    const entry = resolveRef(tabId, ref, snapshotId)
-    if (entry.password) throw apiError('POLICY_DENIED', 'Typing into password fields is not allowed for agents')
-    await locate(tabId, entry)
-    await send(tabId, 'DOM.focus', { backendNodeId: entry.backendNodeId })
+  async function type (tabId, { ref, snapshotId, x, y, text, clear = false, submit = false }) {
+    if (hasPoint({ ref, x, y })) {
+      // Blind target: click to focus, then refuse if the focused field is a secret.
+      await click(tabId, { x, y })
+      if (await focusedIsPassword(tabId)) throw apiError('POLICY_DENIED', 'Typing into password fields is not allowed for agents')
+    } else {
+      const entry = resolveRef(tabId, ref, snapshotId)
+      if (entry.password) throw apiError('POLICY_DENIED', 'Typing into password fields is not allowed for agents')
+      await locate(tabId, entry)
+      await send(tabId, 'DOM.focus', { backendNodeId: entry.backendNodeId })
+    }
     if (clear) {
       await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65, commands: ['selectAll'] })
       await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })
@@ -204,10 +216,10 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
     return { pressed: key }
   }
 
-  async function scroll (tabId, { ref, snapshotId, deltaX = 0, deltaY = 0 }) {
+  async function scroll (tabId, { ref, snapshotId, x: px, y: py, deltaX = 0, deltaY = 0 }) {
     let x = 200
     let y = 200
-    if (ref) ({ x, y } = await locate(tabId, resolveRef(tabId, ref, snapshotId)))
+    if (ref || hasPoint({ x: px, y: py })) ({ x, y } = await point(tabId, { ref, snapshotId, x: px, y: py }))
     await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY })
     return { scrolled: true }
   }
@@ -252,7 +264,54 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
     return { text: text.slice(0, maxChars), truncated: text.length > maxChars, untrusted: true }
   }
 
-  return { snapshot, click, hover, type, press, scroll, screenshot, evaluate, wait, extract, forget: (t) => stores.delete(t) }
+  async function nodeObject (tabId, { ref, snapshotId, selector }) {
+    if (ref) {
+      const entry = resolveRef(tabId, ref, snapshotId)
+      const r = await send(tabId, 'DOM.resolveNode', { backendNodeId: entry.backendNodeId })
+      return { objectId: r.object.objectId, backendNodeId: entry.backendNodeId }
+    }
+    const doc = await send(tabId, 'DOM.getDocument', { depth: 0 })
+    const q = await send(tabId, 'DOM.querySelector', { nodeId: doc.root.nodeId, selector: String(selector) })
+    if (!q || !q.nodeId) throw apiError('ELEMENT_NOT_FOUND', 'Element not found')
+    const r = await send(tabId, 'DOM.resolveNode', { nodeId: q.nodeId })
+    return { objectId: r.object.objectId }
+  }
+
+  async function select (tabId, { ref, snapshotId, values }) {
+    const node = await nodeObject(tabId, { ref, snapshotId })
+    const r = await send(tabId, 'Runtime.callFunctionOn', {
+      objectId: node.objectId,
+      functionDeclaration: `function(values){
+        if (!this || this.tagName !== 'SELECT') return -1
+        let n = 0
+        for (const o of this.options) { o.selected = values.includes(o.value) || values.includes(o.label); if (o.selected) n++ }
+        this.dispatchEvent(new Event('input', { bubbles: true }))
+        this.dispatchEvent(new Event('change', { bubbles: true }))
+        return n
+      }`,
+      arguments: [{ value: values.map(String) }],
+      returnByValue: true
+    })
+    const n = r && r.result ? r.result.value : -1
+    if (n === -1) throw apiError('ELEMENT_NOT_ACTIONABLE', 'Element is not a <select>')
+    if (n === 0) throw apiError('ELEMENT_NOT_FOUND', 'No matching option')
+    return { selected: n }
+  }
+
+  // `files` are absolute paths already resolved by the host from quarantine ids.
+  async function upload (tabId, { ref, snapshotId, selector, files }) {
+    const node = await nodeObject(tabId, { ref, snapshotId, selector })
+    const check = await send(tabId, 'Runtime.callFunctionOn', {
+      objectId: node.objectId,
+      functionDeclaration: 'function(){return !!this && this.tagName === "INPUT" && this.type === "file"}',
+      returnByValue: true
+    })
+    if (!(check && check.result && check.result.value === true)) throw apiError('ELEMENT_NOT_ACTIONABLE', 'Element is not a file input')
+    await send(tabId, 'DOM.setFileInputFiles', { files, objectId: node.objectId })
+    return { uploaded: files.length }
+  }
+
+  return { snapshot, click, hover, type, press, scroll, select, upload, screenshot, evaluate, wait, extract, forget: (t) => stores.delete(t) }
 }
 
 module.exports = { createPageDriver, parseKey }
