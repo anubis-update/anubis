@@ -16,8 +16,8 @@ class McpServer {
     ]
   }
 
-  registerTool (name, { description, inputSchema }, handler) {
-    this.tools.set(name, { description, inputSchema, handler })
+  registerTool (name, { description, inputSchema, annotations }, handler) {
+    this.tools.set(name, { description, inputSchema, annotations, handler })
   }
 
   async connect (transport) {

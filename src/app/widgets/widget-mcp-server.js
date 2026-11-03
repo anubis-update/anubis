@@ -126,6 +126,12 @@ const widgetInfo = {
       description: 'Enable settings APIs'
     },
     {
+      name: 'enableBrowser',
+      type: 'boolean',
+      default: false,
+      description: 'Enable Browser Hub tools (requires the browser API to be enabled). Dangerous commands stay denied for agents by policy.'
+    },
+    {
       name: 'autoRun',
       type: 'boolean',
       default: false,
@@ -1138,6 +1144,21 @@ class ElectermMCPServer {
 
     // Register all tools
     this.registerTools()
+
+    // Browser Hub tools (additive, off by default)
+    if (this.config.enableBrowser) {
+      try {
+        const browserApi = globalState.get('browserApi')
+        if (browserApi) {
+          const { createBrowserMcp } = require('../lib/browser-api/browser-mcp')
+          const registryJson = require('../lib/browser-api/registry.json')
+          const commonSchema = require('../lib/browser-api/common.schema.json')
+          createBrowserMcp({ api: browserApi, commonSchema, registryDefs: registryJson.$defs }).register(this.mcpServer)
+        }
+      } catch (e) {
+        console.error('browser MCP tools registration failed', e && e.message)
+      }
+    }
 
     // Create Express app
     const app = express()

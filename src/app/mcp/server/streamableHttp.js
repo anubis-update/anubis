@@ -4,6 +4,10 @@ function zodToJsonSchema (zodSchema) {
   if (!zodSchema) {
     return { type: 'object', properties: {} }
   }
+  // Pre-built JSON Schema (used by the browser API tools)
+  if (zodSchema.__rawJsonSchema) {
+    return zodSchema.__rawJsonSchema
+  }
   try {
     if (zodSchema && typeof zodSchema === 'object') {
       const hasZodStandard = Object.values(zodSchema).some(
@@ -203,10 +207,11 @@ class StreamableHTTPServerTransport {
         res.status(202).end()
         return
       } else if (request.method === 'tools/list') {
-        const tools = Array.from(this.server.tools.entries()).map(([name, { description, inputSchema }]) => ({
+        const tools = Array.from(this.server.tools.entries()).map(([name, { description, inputSchema, annotations }]) => ({
           name,
           description,
-          inputSchema: zodToJsonSchema(inputSchema)
+          inputSchema: zodToJsonSchema(inputSchema),
+          ...(annotations ? { annotations } : {})
         }))
         result = {
           jsonrpc: '2.0',

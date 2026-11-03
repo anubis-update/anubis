@@ -202,6 +202,11 @@ async function initAppServer () {
     })
     initRbiBrowser(child)
     initCdpBrowser(child)
+    try {
+      initBrowserApi(config, child)
+    } catch (e) {
+      log.error('browser api init failed', e && e.message)
+    }
     globalState.set('browserEngineRouter', require('./rbi-rpc-router').createRbiRpcRouter({
       getRbiBrowser: () => globalState.get('rbiBrowser'),
       getCdpBrowser: () => globalState.get('cdpBrowser'),
@@ -286,6 +291,62 @@ function initCdpBrowser (child) {
   })
   globalState.set('cdpBrowser', cdp)
   child.once('disconnect', () => cdp.disposeAll())
+}
+
+// Browser Hub (/v1 API + MCP tools). OFF by default: enabled only with
+// config.browserApiEnabled or ANUBIS_BROWSER_API=1. Binds 127.0.0.1 only; the
+// bearer token is written to a user-only file, never logged.
+function initBrowserApi (config = {}, child) {
+  if (!(config.browserApiEnabled === true || process.env.ANUBIS_BROWSER_API === '1')) return
+  const { createCdpLaunch, createPipeTransport, createWsTransport, readDevToolsPort, copyProfileTolerant } = require('./cdp-launch')
+  const { createBrowserApi } = require('./browser-api')
+  const { createV1Server, createTokenStore } = require('./browser-api/v1-api')
+  const { spawn } = require('node:child_process')
+  const nodeFs = require('node:fs')
+  const nodePath = require('node:path')
+  const userData = app.getPath('userData')
+  const hubRoot = nodePath.join(userData, 'browser-hub')
+  const { launchBrowser } = createCdpLaunch({
+    spawn,
+    fsExists: (p) => nodeFs.existsSync(p),
+    copyProfile: (src, dst) => copyProfileTolerant(src, dst),
+    copyFile: (src, dst) => nodeFs.copyFileSync(src, dst),
+    removeDir: (p) => nodeFs.rmSync(p, { recursive: true, force: true }),
+    resolveUserDataDir: (browser) => nodePath.join(userData, 'cdp-profiles', browser),
+    resolveHubUserDataDir: (browser, { profileMode, profileId } = {}) => nodePath.join(hubRoot, 'profiles', browser, profileMode || 'dedicated', profileId || 'default'),
+    connectPipe: async (proc) => createPipeTransport(proc),
+    connectPort: async (endpoint) => {
+      const WebSocket = require('ws')
+      const ws = new WebSocket(endpoint)
+      await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject) })
+      return createWsTransport(ws)
+    },
+    readDevToolsEndpoint: async (userDataDir) => {
+      const port = readDevToolsPort(userDataDir)
+      const res = await fetch(`http://127.0.0.1:${port}/json/version`)
+      return (await res.json()).webSocketDebuggerUrl
+    },
+    log
+  })
+  const localAppData = process.env.LOCALAPPDATA || ''
+  const api = createBrowserApi({
+    launchBrowser,
+    resolveSourceDir: (engine) => engine === 'edge'
+      ? nodePath.join(localAppData, 'Microsoft', 'Edge', 'User Data')
+      : nodePath.join(localAppData, 'Google', 'Chrome', 'User Data'),
+    auditDir: nodePath.join(hubRoot, 'audit'),
+    deviceInfo: () => ({ deviceId: require('os').hostname(), anubisVersion: app.getVersion() })
+  })
+  globalState.set('browserApi', api)
+  const tokens = createTokenStore()
+  const { WebSocketServer } = require('ws')
+  const server = createV1Server({ api, tokens, WebSocketServer })
+  server.start().then(({ host, port }) => {
+    nodeFs.mkdirSync(hubRoot, { recursive: true })
+    const agentToken = tokens.issue('agent', 24 * 3600 * 1000)
+    nodeFs.writeFileSync(nodePath.join(hubRoot, 'browser-api.json'), JSON.stringify({ host, port, token: agentToken }), { mode: 0o600 })
+  }).catch((e) => log.error('browser api listen failed', e && e.message))
+  if (child) child.once('disconnect', () => { server.stop(); api.shutdown() })
 }
 
 function initIpc () {
