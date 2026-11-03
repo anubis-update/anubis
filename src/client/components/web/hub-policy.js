@@ -1,7 +1,8 @@
 // Pure helpers for the Browser Hub UI: risk classification, default-deny list
 // and policy validation (SPEC-v1 section 7). No React, unit-testable.
 
-// agentDefault=deny commands from schemas/registry.json
+// Commands the policy editor always lists (agentDefault=deny in registry.json
+// plus the confirm-by-default ones); the live policy may add more rules.
 const DEFAULT_DENY = [
   'page.evaluate',
   'cookies.export',
@@ -59,16 +60,22 @@ function validatePolicy (policy) {
     rules.forEach((r, i) => {
       if (!r.command) errors.push(`${role} rule ${i + 1}: command required`)
       if (!EFFECTS.includes(r.effect)) errors.push(`${role} rule ${i + 1}: bad effect`)
-      if (r.command === '*' && r.effect === 'allow') errors.push(`${role} rule ${i + 1}: wildcard allow is not permitted`)
     })
   })
   return errors
 }
 
+// Same glob semantics as the backend policy engine: '*', 'ns.*', exact
+function globMatch (pattern, name) {
+  if (pattern === '*') return true
+  if (pattern.endsWith('.*')) return name.startsWith(pattern.slice(0, -1))
+  return pattern === name
+}
+
 // First match wins; no match -> deny (default-deny)
 function effectFor (policy, role, command) {
   const rules = (((policy || {}).roles || {})[role] || {}).rules || []
-  const hit = rules.find(r => r.command === command || r.command === '*')
+  const hit = rules.find(r => globMatch(r.command, command))
   return hit ? hit.effect : 'deny'
 }
 
