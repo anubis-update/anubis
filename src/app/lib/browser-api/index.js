@@ -11,6 +11,7 @@ const commonSchema = require('./common.schema.json')
 const { createCommandRegistry, createDispatcher } = require('./command-registry')
 const { createHandlers } = require('./command-handlers')
 const { createPolicyEngine, DEFAULT_POLICY } = require('./policy-engine')
+const { createPolicyStore } = require('./policy-store')
 const { createRedactor } = require('./redactor')
 const { createAuditLog } = require('./audit-log')
 const { createIdempotencyCache } = require('./idempotency-cache')
@@ -31,11 +32,18 @@ function createBrowserApi ({
   adminOverlay,
   engines = ['chrome', 'edge'],
   catalogIo = {},
+  policyIo,
+  staging,
+  vault,
+  readDevModePolicy,
   historyReader,
   now = () => Date.now(),
   transport = 'local-rest'
 } = {}) {
   const policy = createPolicyEngine({ policy: policyDoc, adminOverlay })
+  const policyStore = createPolicyStore({ engine: policy, io: policyIo, adminOverlay })
+  const persistedPolicy = policyStore.load()
+  if (persistedPolicy) policy.setPolicy(persistedPolicy)
   const redactor = createRedactor(policy.redaction())
   const bus = createEventBus({ redact: (d) => redactor.redact(d).value, now })
   const audit = createAuditLog({ fsApi: auditFs, dir: auditDir || path.join('.', 'browser-audit'), now, retainDays: (policy.audit() || {}).retainDays })
@@ -51,6 +59,10 @@ function createBrowserApi ({
     catalog,
     historyReader: history,
     getLimits: () => policy.limits(),
+    checkUrl: (url) => policy.checkUrl(url),
+    allowExtensions: () => policy.extensions().allowInstall === true,
+    resolveSource: (source) => (staging && source.stagedId ? staging.resolveDir(source.stagedId) : null),
+    readDevModePolicy,
     emit: bus.emit
   }))
   drivers.push(createRbiDriver())
@@ -61,6 +73,8 @@ function createBrowserApi ({
     hub,
     policy,
     leases,
+    staging,
+    vault,
     deviceInfo: () => ({ ...deviceInfo(), registry: registry.list() })
   })
   const info = deviceInfo()
@@ -79,7 +93,7 @@ function createBrowserApi ({
     now
   })
 
-  return { registry, dispatcher, hub, policy, audit, events: bus, confirmations, leases, redactor, catalog, shutdown: () => hub.shutdown() }
+  return { registry, dispatcher, hub, policy, policyStore, staging, audit, events: bus, confirmations, leases, redactor, catalog, shutdown: () => hub.shutdown() }
 }
 
 module.exports = { createBrowserApi }

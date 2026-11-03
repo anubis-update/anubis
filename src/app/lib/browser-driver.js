@@ -14,6 +14,11 @@ const path = require('node:path')
 const { apiError } = require('./browser-api/errors')
 const { createTabManager } = require('./cdp-tabs')
 const { createPageDriver } = require('./cdp-ax')
+const { createNavGuard } = require('./cdp-nav-guard')
+const { createDownloadTracker } = require('./cdp-downloads')
+const { createStorageDriver } = require('./cdp-storage')
+const { createExtensionManager } = require('./cdp-extensions')
+const { createHistoryClearer } = require('./cdp-history-clear')
 
 const CAPS = Object.freeze({
   TABS: 'tabs',
@@ -24,7 +29,13 @@ const CAPS = Object.freeze({
   COOKIES: 'cookies',
   HISTORY: 'history',
   PROFILES: 'profile.enumerate',
-  LAUNCH: 'browser.launch'
+  LAUNCH: 'browser.launch',
+  EXTENSIONS: 'extensions',
+  EXTENSIONS_LOAD: 'extensions.loadUnpacked',
+  DEV_MODE: 'devMode',
+  STORAGE: 'storage',
+  DOWNLOADS: 'downloads',
+  UPLOAD: 'page.upload'
 })
 
 const CONTRACT = ['capabilities', 'listBrowsers', 'launch', 'closeBrowser', 'listTabs', 'newTab', 'activateTab', 'closeTab', 'navigate', 'page']
@@ -64,12 +75,22 @@ function createCdpDriver ({
   idGen = (p) => p + crypto.randomBytes(6).toString('hex'),
   makeTabs = createTabManager,
   makePage = createPageDriver,
+  checkUrl,
+  allowExtensions = () => false,
+  resolveSource,
+  readDevModePolicy,
+  makeNavGuard = createNavGuard,
+  makeDownloads = createDownloadTracker,
+  makeStorage = createStorageDriver,
+  makeExtensions = createExtensionManager,
+  makeHistoryClearer = createHistoryClearer,
   allowedFlags = ['--lang', '--window-size', '--user-agent', '--disable-gpu', '--mute-audio']
 } = {}) {
   if (typeof launchBrowser !== 'function') throw new TypeError('cdp driver requires launchBrowser')
   const browsers = new Map() // browserId -> { handle, tabs, page, profileId, headless }
   const tabOwner = new Map() // tabId -> browserId
   const capSet = new Set([CAPS.TABS, CAPS.SNAPSHOT, CAPS.SCREENSHOT, CAPS.INPUT, CAPS.EVALUATE, CAPS.COOKIES, CAPS.LAUNCH])
+  capSet.add(CAPS.EXTENSIONS).add(CAPS.EXTENSIONS_LOAD).add(CAPS.DEV_MODE).add(CAPS.STORAGE).add(CAPS.DOWNLOADS).add(CAPS.UPLOAD)
   if (catalog) capSet.add(CAPS.PROFILES)
   if (historyReader && historyReader.available) capSet.add(CAPS.HISTORY)
 
@@ -94,8 +115,8 @@ function createCdpDriver ({
   }
 
   async function launch ({ profileId, profileMode = 'dedicated', headless = false, extensions, flags, window: win, url, devMode } = {}) {
-    if (extensions && extensions.length) throw apiError('CAPABILITY_MISSING', 'Extensions are not supported in this build')
-    if (devMode) throw apiError('CAPABILITY_MISSING', 'devMode is not supported in this build')
+    if (extensions && extensions.length) throw apiError('CAPABILITY_MISSING', 'Install extensions with extension.install after launch')
+    if (devMode) throw apiError('CAPABILITY_MISSING', 'Use devMode.set after launch')
     const limits = getLimits()
     if (browsers.size >= (limits.maxBrowsers || 2)) throw apiError('LIMIT_EXCEEDED', 'maxBrowsers reached')
     let profileDirectory
@@ -123,15 +144,21 @@ function createCdpDriver ({
       url,
       width: win && win.width,
       height: win && win.height,
-      extraFlags: sanitizeFlags(flags)
+      extraFlags: sanitizeFlags(flags),
+      unsafeExtensionDebugging: !!allowExtensions()
     })
+    const guard = typeof checkUrl === 'function'
+      ? makeNavGuard({ client: handle.client, checkUrl, emit: (event, e) => emit(event, { browserId, ...e }) })
+      : null
     const tabs = makeTabs({
       client: handle.client,
       limits,
-      emit: (event, e) => emit(event, { browserId, ...e })
+      emit: (event, e) => emit(event, { browserId, ...e }),
+      onSession: guard ? (sessionId, tabId) => guard.attach(sessionId, tabId) : undefined
     })
     const page = makePage({ tabs })
-    const b = { browserId, handle, tabs, page, profileId: profileId || 'default', profileMode, headless: !!headless }
+    const downloads = makeDownloads({ client: handle.client })
+    const b = { browserId, handle, tabs, page, downloads, profileId: profileId || 'default', profileMode, headless: !!headless }
     browsers.set(browserId, b)
     if (typeof handle.onExit === 'function') {
       handle.onExit(() => {
@@ -144,6 +171,7 @@ function createCdpDriver ({
     }
     try {
       await tabs.init()
+      await downloads.start()
     } catch (e) {
       browsers.delete(browserId)
       try { handle.close() } catch {}
@@ -236,6 +264,23 @@ function createCdpDriver ({
       const dir = path.join(b.handle.userDataDir, b.handle.profileDirectory || 'Default')
       return historyReader.search({ historyPath: path.join(dir, 'History'), ...query })
     },
+
+    extensionsOf (browserId) {
+      const b = entry(browserId)
+      if (!b.extensions) {
+        b.extensions = makeExtensions({
+          client: b.handle.client,
+          tabs: b.tabs,
+          engine,
+          resolveSource,
+          readDevModePolicy
+        })
+      }
+      return b.extensions
+    },
+    storage: (tabId) => makeStorage({ tabs: ownerOfTab(tabId).tabs }),
+    downloads: (browserId, opts) => entry(browserId).downloads.list(opts),
+    clearHistory: (browserId, opts) => makeHistoryClearer({ tabs: entry(browserId).tabs, engine })(opts),
 
     shutdown () {
       for (const id of [...browsers.keys()]) closeBrowser(id).catch(() => {})

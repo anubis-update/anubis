@@ -36,7 +36,7 @@ test('launch is dedicated by default, enforces limits, rejects extensions/devMod
   const r = await driver.launch({})
   assert.equal(r.profileMode, 'dedicated')
   assert.equal(launched[0].profileMode, 'dedicated')
-  assert.equal(launched[0].unsafeExtensionDebugging, undefined)
+  assert.equal(launched[0].unsafeExtensionDebugging, false)
   await assert.rejects(driver.launch({ profileMode: 'ephemeral' }), (e) => e.code === 'LIMIT_EXCEEDED')
 })
 

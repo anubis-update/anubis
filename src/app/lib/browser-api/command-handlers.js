@@ -1,15 +1,13 @@
 /**
  * Command handlers: map registry command names to driver calls. Everything
  * here runs AFTER the dispatcher's validation/policy/lease checks. Commands
- * that are declared in the registry but not implemented in this build throw
- * CAPABILITY_MISSING (extensions, devMode, storage, downloads, passwords,
- * credentials, uploads, history.clear, coordinate targets, select).
+ * the build cannot serve (passwords import/export, crx installs, credentials)
+ * throw CAPABILITY_MISSING with a reason.
  */
 
 const { apiError } = require('./errors')
 
 const ok = (extra = {}) => ({ ok: true, snapshotInvalidated: true, ...extra })
-const missing = (what) => () => { throw apiError('CAPABILITY_MISSING', what + ' is not available in this build') }
 
 function trimSnapshot (snap, maxBytes) {
   if (!maxBytes) return snap
@@ -25,11 +23,22 @@ function trimSnapshot (snap, maxBytes) {
   return { ...snap, nodes, tree, truncated }
 }
 
-function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}) }) {
+function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}), staging, vault }) {
   const target = (t) => {
-    if (!t || !t.ref) throw apiError('CAPABILITY_MISSING', 'Coordinate targets are not available in this build; use a ref from page.snapshot')
-    return { ref: t.ref, snapshotId: t.snapshotId }
+    if (t && t.ref) return { ref: t.ref, snapshotId: t.snapshotId }
+    if (t && Number.isFinite(t.x) && Number.isFinite(t.y)) return { x: t.x, y: t.y }
+    throw apiError('INVALID_REQUEST', 'target needs a ref or x/y coordinates')
   }
+  const needStaging = () => {
+    if (!staging) throw apiError('CAPABILITY_MISSING', 'Staging area is not configured')
+    return staging
+  }
+  const allowInstall = () => {
+    if (!(policy.extensions && policy.extensions().allowInstall === true)) {
+      throw apiError('POLICY_DENIED', 'Extension installation is disabled by policy')
+    }
+  }
+  const PW_REASON = 'Browser password import/export opens native file dialogs that this build cannot drive'
 
   const nav = (kind) => async ({ driver, tabId, params }) => {
     const r = await driver.navigate(tabId, kind, { url: params.url, waitUntil: params.waitUntil, ignoreCache: params.ignoreCache, timeoutMs: 15000 })
@@ -132,8 +141,15 @@ function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}) }) {
       await driver.page(tabId).hover(tabId, target(params.target))
       return ok()
     },
-    'page.select': missing('page.select'),
-    'page.upload': missing('page.upload'),
+    async 'page.select' ({ driver, tabId, params }) {
+      const r = await driver.page(tabId).select(tabId, { ...target(params.target), values: params.values })
+      return ok({ selected: r && r.selected })
+    },
+    async 'page.upload' ({ driver, tabId, params }) {
+      const files = needStaging().resolveFiles(params.files)
+      const r = await driver.page(tabId).upload(tabId, { ...target(params.target), files })
+      return ok({ uploaded: r && r.uploaded })
+    },
     async 'page.wait' ({ driver, tabId, params }) {
       await driver.page(tabId).wait(tabId, { text: params.text, selector: params.selector, timeoutMs: params.timeoutMs })
       return { ok: true }
@@ -177,7 +193,61 @@ function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}) }) {
       const r = await driver.history(browserId, { text: params.query, limit: params.limit })
       return { entries: r.entries, untrusted: true }
     },
-    'history.clear': missing('history.clear'),
+    async 'history.clear' ({ driver, browserId, params }) {
+      return driver.clearHistory(browserId, { since: params.since, until: params.until })
+    },
+
+    'downloads.list' ({ driver, browserId, params }) {
+      return driver.downloads(browserId, { limit: params.limit })
+    },
+
+    'storage.get' ({ driver, tabId, params }) {
+      return driver.storage(tabId).get(tabId, { kind: params.kind, keys: params.keys })
+    },
+    'storage.set' ({ driver, tabId, params }) {
+      return driver.storage(tabId).set(tabId, { kind: params.kind, entries: params.entries })
+    },
+    'storage.clear' ({ driver, tabId, params }) {
+      const v = policy.checkUrl(params.origin)
+      if (!v.ok) throw apiError('POLICY_DENIED', v.reason || 'Origin is not allowed')
+      return driver.storage(tabId).clear(tabId, { origin: params.origin, types: params.types })
+    },
+
+    'extension.list' ({ driver, browserId }) {
+      return driver.extensionsOf(browserId).list()
+    },
+    async 'extension.install' ({ driver, browserId, params }) {
+      allowInstall()
+      const s = params.source || {}
+      if (s.type === 'crx') throw apiError('CAPABILITY_MISSING', 'Packed (.crx) extensions are not supported; use an unpacked MV3 folder')
+      if (s.type === 'unpacked') {
+        needStaging().resolveDir(s.stagedId)
+        return driver.extensionsOf(browserId).install({ source: { stagedId: s.stagedId } })
+      }
+      if (s.type === 'catalog') return driver.extensionsOf(browserId).install({ source: { catalogId: s.catalogId } })
+      throw apiError('INVALID_REQUEST', 'Unknown extension source')
+    },
+    async 'extension.enable' ({ driver, browserId, params }) {
+      allowInstall()
+      return driver.extensionsOf(browserId).enable(params.extensionId)
+    },
+    'extension.disable' ({ driver, browserId, params }) {
+      return driver.extensionsOf(browserId).disable(params.extensionId)
+    },
+    async 'extension.remove' ({ driver, browserId, params }) {
+      return driver.extensionsOf(browserId).remove(params.extensionId)
+    },
+    'devMode.set' ({ driver, browserId, params }) {
+      return driver.extensionsOf(browserId).setDevMode(params.enabled)
+    },
+
+    async 'passwords.import' ({ params }) {
+      if (vault && staging) vault.inspectStaged(staging.resolveFile(params.stagedId).path)
+      throw apiError('CAPABILITY_MISSING', PW_REASON)
+    },
+    'passwords.export' () {
+      throw apiError('CAPABILITY_MISSING', PW_REASON)
+    },
 
     'lease.acquire' ({ actor, browserId, params }) {
       if (!browserId) throw apiError('INVALID_REQUEST', 'browserId is required to acquire a lease')
