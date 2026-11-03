@@ -83,12 +83,18 @@ function detectBrowserPath (browser, { env = process.env, fsExists } = {}) {
   return null
 }
 
-function buildLaunchArgs ({ userDataDir, width, height, pipe = true, url, extraFlags = [] } = {}) {
+function buildLaunchArgs ({
+  userDataDir, width, height, pipe = true, url, extraFlags = [],
+  profileDirectory, headless, unsafeExtensionDebugging
+} = {}) {
   const args = [
     pipe ? '--remote-debugging-pipe' : '--remote-debugging-port=0',
     '--user-data-dir=' + userDataDir,
     ...HARDENING_FLAGS
   ]
+  if (profileDirectory) args.push('--profile-directory=' + profileDirectory)
+  if (headless) args.push('--headless=new')
+  if (unsafeExtensionDebugging) args.push('--enable-unsafe-extension-debugging')
   const w = Math.floor(Number(width))
   const h = Math.floor(Number(height))
   if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
@@ -265,6 +271,9 @@ function createCdpLaunch ({
   readDevToolsEndpoint,
   isBrowserRunning,
   resolveUserDataDir,
+  resolveHubUserDataDir,
+  copyFile,
+  removeDir,
   resolveSourceProfile = (browser, { env = process.env } = {}) => DEFAULT_SOURCE_PROFILE[normalizeBrowser(browser)](env),
   env = process.env,
   preferPipe = true,
@@ -443,7 +452,125 @@ function createCdpLaunch ({
     }
   }
 
-  return { launcher, cdpClient }
+  // Browser-level launch for the Browser Hub driver (browser -> N tabs). Unlike
+  // `launcher` it is never shared/ref-counted, does NOT attach to a page, and
+  // supports dedicated / managed-copy / ephemeral profiles plus a specific
+  // profile directory. Existing `launcher`/`cdpClient` behaviour is untouched.
+  async function launchBrowser ({
+    id,
+    browser = 'chrome',
+    profileMode = 'dedicated',
+    profileId,
+    profileDirectory,
+    url,
+    width,
+    height,
+    headless,
+    extraFlags = [],
+    unsafeExtensionDebugging = false
+  } = {}) {
+    const key = normalizeBrowser(browser)
+    const exePath = detectPath(browser, { env, fsExists })
+    if (!exePath) throw codedError('BROWSER_NOT_FOUND', `No ${key} installation was found`)
+    if (!['dedicated', 'managed-copy', 'ephemeral'].includes(profileMode)) {
+      throw codedError('INVALID_REQUEST', 'Unknown profileMode')
+    }
+    const hubRoot = typeof resolveHubUserDataDir === 'function'
+      ? null
+      : path.join(path.dirname(resolveUserDataDir(browser, { env })), 'hub', key)
+    const safeName = String(profileId || 'default').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) || 'default'
+    let userDataDir
+    let ephemeral = false
+    if (profileMode === 'ephemeral') {
+      ephemeral = true
+      userDataDir = typeof resolveHubUserDataDir === 'function'
+        ? resolveHubUserDataDir(browser, { profileMode, profileId: 'eph_' + String(id) })
+        : path.join(hubRoot, 'eph_' + String(id).replace(/[^A-Za-z0-9_-]/g, '_'))
+    } else {
+      userDataDir = typeof resolveHubUserDataDir === 'function'
+        ? resolveHubUserDataDir(browser, { profileMode, profileId: safeName })
+        : path.join(hubRoot, profileMode === 'managed-copy' ? 'copy_' + safeName : safeName)
+    }
+    const warnings = []
+    if (profileMode === 'managed-copy') {
+      const source = resolveSourceProfile(browser, { env })
+      const dir = profileDirectory || 'Default'
+      const exists = source && (typeof fsExists === 'function' ? await fsExists(path.join(source, dir)) : fs.existsSync(path.join(source, dir)))
+      if (!exists) throw codedError('PROFILE_NOT_FOUND', `No ${key} profile was found to copy`)
+      if (typeof isBrowserRunning === 'function' && await isBrowserRunning(browser)) {
+        warnings.push(`A ${key} window is running; locked profile files were skipped`)
+      }
+      if (typeof copyProfile === 'function') {
+        await copyProfile(path.join(source, dir), path.join(userDataDir, dir))
+        if (typeof copyFile === 'function') {
+          try { await copyFile(path.join(source, 'Local State'), path.join(userDataDir, 'Local State')) } catch {}
+        }
+      }
+      warnings.push('Copied profile may not carry sessions or saved passwords (App-Bound Encryption)')
+    }
+    const buildArgs = (pipe) => buildLaunchArgs({
+      userDataDir,
+      width,
+      height,
+      pipe,
+      url,
+      extraFlags,
+      profileDirectory: profileMode === 'managed-copy' ? (profileDirectory || 'Default') : undefined,
+      headless,
+      unsafeExtensionDebugging: !!unsafeExtensionDebugging && profileMode !== 'managed-copy'
+    })
+    let child = null
+    let transport = null
+    let mode = null
+    if (preferPipe && typeof connectPipe === 'function') {
+      child = spawn(exePath, buildArgs(true), { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] })
+      try {
+        transport = await connectPipe(child)
+        mode = 'pipe'
+      } catch (error) {
+        if (log && typeof log.warn === 'function') log.warn('CDP pipe connect failed, using port:', error && error.message)
+        try { if (child && child.kill) child.kill() } catch {}
+        child = null
+      }
+    }
+    if (!transport) {
+      child = spawn(exePath, buildArgs(false), { stdio: 'ignore' })
+      const endpoint = await readDevToolsEndpoint(userDataDir, child)
+      transport = await connectPort(endpoint)
+      mode = 'port'
+    }
+    const client = createCdpClient(transport)
+    let closed = false
+    const exitCallbacks = []
+    const fireExit = () => { for (const cb of exitCallbacks.splice(0)) { try { cb() } catch {} } }
+    if (child && typeof child.once === 'function') child.once('exit', fireExit)
+    if (transport && typeof transport.on === 'function') transport.on('close', fireExit)
+    return {
+      id,
+      browser: key,
+      exePath,
+      userDataDir,
+      profileDirectory: profileDirectory || 'Default',
+      profileMode,
+      warnings,
+      child,
+      transport,
+      client,
+      mode,
+      onExit (cb) { exitCallbacks.push(cb) },
+      close () {
+        if (closed) return
+        closed = true
+        try { client.close() } catch {}
+        try { if (child && child.kill) child.kill() } catch {}
+        if (ephemeral && typeof removeDir === 'function') {
+          try { Promise.resolve(removeDir(userDataDir)).catch(() => {}) } catch {}
+        }
+      }
+    }
+  }
+
+  return { launcher, cdpClient, launchBrowser }
 }
 
 module.exports = {

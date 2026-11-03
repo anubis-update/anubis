@@ -1,0 +1,368 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anubis.local/schemas/v1/registry.json",
+  "title": "Anubis Browser API v1 — Command Registry (единственный источник истины)",
+  "x-note": "Из этого файла генерируются: /v1 REST/WS, MCP tools (имя = mcp), UI-формы, проверки политики. Поле agentDefault: allow | confirm | deny — политика по умолчанию для роли agent.",
+  "version": 1,
+  "$defs": {
+    "Target": {
+      "type": "object", "additionalProperties": false,
+      "description": "Цель действия: ref из последнего snapshot (предпочтительно) или координаты (запасной вариант, vision-режим).",
+      "properties": {
+        "ref": { "$ref": "common.schema.json#/$defs/ref" },
+        "snapshotId": { "$ref": "common.schema.json#/$defs/snapshotId", "description": "Если указан и устарел — STALE_REF." },
+        "x": { "type": "number" }, "y": { "type": "number" },
+        "frameId": { "type": "string" }
+      },
+      "oneOf": [{ "required": ["ref"] }, { "required": ["x", "y"] }]
+    },
+    "ActionResult": {
+      "type": "object", "required": ["ok"],
+      "properties": {
+        "ok": { "const": true },
+        "navigated": { "type": "boolean" }, "url": { "type": "string" },
+        "newTabId": { "$ref": "common.schema.json#/$defs/tabId" },
+        "dialog": { "type": "object", "properties": { "kind": { "type": "string" }, "message": { "type": "string" } } },
+        "snapshotInvalidated": { "type": "boolean", "description": "true — DOM/URL изменились, нужен новый page.snapshot." }
+      }
+    },
+    "NavResult": {
+      "type": "object", "required": ["url"],
+      "properties": { "url": { "type": "string" }, "title": { "type": "string" }, "status": { "type": "integer" }, "loaded": { "type": "boolean" } }
+    },
+    "Image": {
+      "type": "object", "required": ["mime", "dataBase64", "width", "height"],
+      "properties": { "mime": { "enum": ["image/jpeg", "image/png"] }, "dataBase64": { "type": "string" }, "width": { "type": "integer" }, "height": { "type": "integer" }, "untrusted": { "const": true } }
+    },
+    "SnapNode": {
+      "type": "object", "required": ["ref", "role"],
+      "properties": {
+        "ref": { "$ref": "common.schema.json#/$defs/ref" }, "role": { "type": "string" }, "name": { "type": "string", "maxLength": 300 },
+        "value": { "type": "string", "description": "Для password-полей всегда пусто/маска." },
+        "states": { "type": "array", "items": { "enum": ["checked", "disabled", "focused", "expanded", "selected", "required", "invalid", "readonly", "password"] } },
+        "frameId": { "type": "string" }, "bbox": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+        "children": { "type": "array", "items": { "type": "integer", "description": "индексы в nodes" } }
+      }
+    },
+    "Cookie": {
+      "type": "object", "required": ["name", "domain"],
+      "properties": {
+        "name": { "type": "string" }, "value": { "type": "string" }, "domain": { "type": "string" }, "path": { "type": "string", "default": "/" },
+        "expires": { "type": "number" }, "secure": { "type": "boolean" }, "httpOnly": { "type": "boolean" },
+        "sameSite": { "enum": ["Strict", "Lax", "None"] }, "partitionKey": { "type": "object" }
+      }
+    },
+    "HistoryItem": {
+      "type": "object", "required": ["url", "lastVisitTime"],
+      "properties": { "url": { "type": "string" }, "title": { "type": "string" }, "lastVisitTime": { "type": "string", "format": "date-time" }, "visitCount": { "type": "integer" } }
+    },
+    "BrowserInfo": {
+      "type": "object", "required": ["browserId", "engine", "state"],
+      "properties": {
+        "browserId": { "$ref": "common.schema.json#/$defs/browserId" }, "engine": { "$ref": "common.schema.json#/$defs/engine" }, "version": { "type": "string" },
+        "profileId": { "$ref": "common.schema.json#/$defs/profileId" }, "state": { "enum": ["starting", "ready", "closing", "crashed"] },
+        "tabCount": { "type": "integer" }, "controller": { "enum": ["agent", "human", "none"] }, "capabilities": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ProfileInfo": {
+      "type": "object", "required": ["profileId", "engine", "displayName"],
+      "properties": {
+        "profileId": { "$ref": "common.schema.json#/$defs/profileId" }, "engine": { "$ref": "common.schema.json#/$defs/engine" },
+        "displayName": { "type": "string" }, "directoryName": { "type": "string", "description": "Default, Profile 1 … (не полный путь)" },
+        "accountHint": { "type": "string", "description": "Маскированный e-mail из Local State, напр. a***@gmail.com" },
+        "isDefault": { "type": "boolean" }, "inUse": { "type": "boolean", "description": "Профиль открыт обычным браузером (lock)." },
+        "source": { "enum": ["system", "anubis"] }, "lastUsed": { "type": "string", "format": "date-time" }
+      }
+    },
+    "TabInfo": {
+      "type": "object", "required": ["tabId", "url"],
+      "properties": {
+        "tabId": { "$ref": "common.schema.json#/$defs/tabId" }, "browserId": { "$ref": "common.schema.json#/$defs/browserId" },
+        "url": { "type": "string" }, "title": { "type": "string", "maxLength": 500 }, "active": { "type": "boolean" },
+        "loading": { "type": "boolean" }, "openerTabId": { "$ref": "common.schema.json#/$defs/tabId" }, "untrusted": { "const": true }
+      }
+    },
+    "ExtensionInfo": {
+      "type": "object", "required": ["extensionId", "name"],
+      "properties": {
+        "extensionId": { "$ref": "common.schema.json#/$defs/extensionId" }, "name": { "type": "string" }, "version": { "type": "string" },
+        "enabled": { "type": "boolean" }, "manifestVersion": { "enum": [2, 3] }, "installType": { "enum": ["unpacked", "store", "policy", "other"] },
+        "permissions": { "type": "array", "items": { "type": "string" } }, "hostPermissions": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "commands": [
+    {
+      "name": "api.capabilities", "mcp": "anubis_capabilities", "risk": "read", "agentDefault": "allow", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "properties": { "clientVersions": { "type": "array", "items": { "type": "integer" } } } },
+      "result": { "type": "object", "required": ["apiVersion", "deviceId", "anubisVersion", "engines", "commands", "limits"], "properties": {
+        "apiVersion": { "type": "integer" }, "deviceId": { "type": "string" }, "anubisVersion": { "type": "string" },
+        "engines": { "type": "array", "items": { "type": "object", "required": ["engine", "installed"], "properties": { "engine": { "$ref": "common.schema.json#/$defs/engine" }, "installed": { "type": "boolean" }, "version": { "type": "string" }, "capabilities": { "type": "array", "items": { "type": "string" } } } } },
+        "commands": { "type": "array", "items": { "type": "object", "required": ["name", "available"], "properties": { "name": { "type": "string" }, "available": { "type": "boolean" }, "reason": { "type": "string" }, "engines": { "type": "array", "items": { "type": "string" } } } } },
+        "limits": { "type": "object", "properties": { "maxBrowsers": { "type": "integer" }, "maxTabsPerBrowser": { "type": "integer" }, "maxSnapshotBytes": { "type": "integer" }, "maxCommandsPerMinute": { "type": "integer" } } }
+      } }
+    },
+    {
+      "name": "browser.list", "mcp": "browser_list", "risk": "read", "agentDefault": "allow", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "properties": { "includeInstalled": { "type": "boolean", "default": true } } },
+      "result": { "type": "object", "required": ["running", "installed"], "properties": {
+        "running": { "type": "array", "items": { "$ref": "#/$defs/BrowserInfo" } },
+        "installed": { "type": "array", "items": { "type": "object", "required": ["engine"], "properties": { "engine": { "$ref": "common.schema.json#/$defs/engine" }, "version": { "type": "string" } } } }
+      } }
+    },
+    {
+      "name": "browser.launch", "mcp": "browser_launch", "risk": "write", "agentDefault": "confirm", "requires": ["browser.launch"], "idempotent": true,
+      "params": { "type": "object", "required": ["engine"], "additionalProperties": false, "properties": {
+        "engine": { "$ref": "common.schema.json#/$defs/engine" },
+        "profileId": { "$ref": "common.schema.json#/$defs/profileId" },
+        "profileMode": { "enum": ["managed-copy", "dedicated", "ephemeral"], "default": "dedicated", "description": "managed-copy — копия профиля пользователя (как сейчас в cdp-launch); dedicated — постоянный профиль Anubis; ephemeral — одноразовый." },
+        "headless": { "type": "boolean", "default": false },
+        "devMode": { "type": "boolean", "default": false },
+        "extensions": { "type": "array", "maxItems": 16, "items": { "type": "string", "description": "id записи из extension-каталога Anubis (не путь)" } },
+        "flags": { "type": "array", "maxItems": 16, "items": { "enum": ["--window-size", "--lang", "--proxy-server", "--force-device-scale-factor", "--incognito", "--disable-gpu"] }, "description": "Allowlist; значения проверяются отдельно." },
+        "window": { "type": "object", "properties": { "width": { "type": "integer", "minimum": 320, "maximum": 4096 }, "height": { "type": "integer", "minimum": 240, "maximum": 4096 } } },
+        "url": { "$ref": "common.schema.json#/$defs/url" },
+        "userAgent": { "type": "string", "maxLength": 1024, "pattern": "^[^\\r\\n]*$" }
+      } },
+      "result": { "type": "object", "required": ["browserId", "engine", "tabs"], "properties": { "browserId": { "$ref": "common.schema.json#/$defs/browserId" }, "engine": { "type": "string" }, "version": { "type": "string" }, "profileId": { "$ref": "common.schema.json#/$defs/profileId" }, "tabs": { "type": "array", "items": { "$ref": "#/$defs/TabInfo" } }, "warnings": { "type": "array", "items": { "type": "string" } } } }
+    },
+    {
+      "name": "browser.close", "mcp": "browser_close", "risk": "write", "agentDefault": "allow", "requires": [], "idempotent": true,
+      "params": { "type": "object", "additionalProperties": false, "properties": { "force": { "type": "boolean", "default": false } } },
+      "result": { "type": "object", "properties": { "closed": { "type": "boolean" } } },
+      "scope": "browserId"
+    },
+    {
+      "name": "profile.list", "mcp": "profile_list", "risk": "read", "agentDefault": "allow", "requires": ["profile.enumerate"],
+      "params": { "type": "object", "additionalProperties": false, "properties": { "engine": { "$ref": "common.schema.json#/$defs/engine" }, "source": { "enum": ["system", "anubis"], "default": "system" } } },
+      "result": { "type": "object", "required": ["profiles"], "properties": { "profiles": { "type": "array", "items": { "$ref": "#/$defs/ProfileInfo" } } } }
+    },
+    {
+      "name": "profile.select", "mcp": "profile_select", "risk": "write", "agentDefault": "confirm", "requires": ["profile.enumerate"], "idempotent": true,
+      "params": { "type": "object", "required": ["profileId"], "additionalProperties": false, "properties": { "profileId": { "$ref": "common.schema.json#/$defs/profileId" }, "asDefaultFor": { "type": "string", "description": "Опционально: имя задачи/сценария." } } },
+      "result": { "type": "object", "properties": { "selected": { "$ref": "#/$defs/ProfileInfo" } } }
+    },
+    {
+      "name": "tab.list", "mcp": "tab_list", "risk": "read", "agentDefault": "allow", "requires": ["tabs"], "scope": "browserId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "includeInternal": { "type": "boolean", "default": false, "description": "chrome://, devtools и т.п." } } },
+      "result": { "type": "object", "required": ["tabs"], "properties": { "tabs": { "type": "array", "items": { "$ref": "#/$defs/TabInfo" } }, "activeTabId": { "$ref": "common.schema.json#/$defs/tabId" } } }
+    },
+    {
+      "name": "tab.new", "mcp": "tab_new", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "additionalProperties": false, "properties": { "url": { "$ref": "common.schema.json#/$defs/url" }, "activate": { "type": "boolean", "default": true }, "background": { "type": "boolean", "default": false } } },
+      "result": { "type": "object", "required": ["tab"], "properties": { "tab": { "$ref": "#/$defs/TabInfo" } } }
+    },
+    {
+      "name": "tab.activate", "mcp": "tab_activate", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "tabId", "idempotent": true,
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "properties": { "tab": { "$ref": "#/$defs/TabInfo" } } }
+    },
+    {
+      "name": "tab.close", "mcp": "tab_close", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "tabId", "idempotent": true,
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "properties": { "closed": { "type": "boolean" } } }
+    },
+    {
+      "name": "tab.reload", "mcp": "tab_reload", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "ignoreCache": { "type": "boolean", "default": false }, "waitUntil": { "enum": ["load", "domcontentloaded", "networkidle", "none"], "default": "load" } } },
+      "result": { "$ref": "#/$defs/NavResult" }
+    },
+    {
+      "name": "tab.back", "mcp": "tab_back", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "waitUntil": { "enum": ["load", "domcontentloaded", "networkidle", "none"], "default": "load" } } },
+      "result": { "$ref": "#/$defs/NavResult" }
+    },
+    {
+      "name": "tab.forward", "mcp": "tab_forward", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "waitUntil": { "enum": ["load", "domcontentloaded", "networkidle", "none"], "default": "load" } } },
+      "result": { "$ref": "#/$defs/NavResult" }
+    },
+    {
+      "name": "tab.goto", "mcp": "tab_goto", "risk": "write", "agentDefault": "allow", "requires": ["tabs"], "scope": "tabId", "x-note": "Добавлена к плану: без неё нельзя перейти по URL в существующей вкладке. Проверяется доменная политика.",
+      "params": { "type": "object", "required": ["url"], "additionalProperties": false, "properties": { "url": { "$ref": "common.schema.json#/$defs/url" }, "waitUntil": { "enum": ["load", "domcontentloaded", "networkidle", "none"], "default": "load" } } },
+      "result": { "$ref": "#/$defs/NavResult" }
+    },
+    {
+      "name": "page.snapshot", "mcp": "page_snapshot", "risk": "read", "agentDefault": "allow", "requires": ["page.snapshot"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": {
+        "mode": { "enum": ["ax", "ax+dom", "text"], "default": "ax" },
+        "scopeRef": { "$ref": "common.schema.json#/$defs/ref", "description": "Снимок только поддерева." },
+        "interestingOnly": { "type": "boolean", "default": true },
+        "includeFrames": { "type": "boolean", "default": true },
+        "viewportOnly": { "type": "boolean", "default": false },
+        "maxBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 131072 },
+        "withScreenshot": { "type": "boolean", "default": false }
+      } },
+      "result": { "type": "object", "required": ["snapshotId", "url", "title", "tree"], "properties": {
+        "snapshotId": { "$ref": "common.schema.json#/$defs/snapshotId" }, "url": { "type": "string" }, "title": { "type": "string" },
+        "tree": { "type": "string", "description": "Текстовое дерево, строки вида: - button \"Войти\" [ref=e12]. Значения password-полей заменены на ••• ." },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/SnapNode" } },
+        "truncated": { "type": "boolean" }, "untrusted": { "const": true }, "screenshot": { "$ref": "#/$defs/Image" }
+      } }
+    },
+    {
+      "name": "page.screenshot", "mcp": "page_screenshot", "risk": "read", "agentDefault": "allow", "requires": ["page.screenshot"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "fullPage": { "type": "boolean", "default": false }, "ref": { "$ref": "common.schema.json#/$defs/ref" }, "format": { "enum": ["jpeg", "png"], "default": "jpeg" }, "quality": { "type": "integer", "minimum": 20, "maximum": 100, "default": 70 }, "maxWidth": { "type": "integer", "maximum": 4096, "default": 1280 } } },
+      "result": { "$ref": "#/$defs/Image" }
+    },
+    {
+      "name": "page.click", "mcp": "page_click", "risk": "write", "agentDefault": "allow", "requires": ["page.input"], "scope": "tabId",
+      "params": { "type": "object", "required": ["target"], "additionalProperties": false, "properties": { "target": { "$ref": "#/$defs/Target" }, "button": { "enum": ["left", "right", "middle"], "default": "left" }, "clickCount": { "type": "integer", "minimum": 1, "maximum": 3, "default": 1 }, "modifiers": { "type": "array", "items": { "enum": ["Alt", "Control", "Meta", "Shift"] } } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.type", "mcp": "page_type", "risk": "write", "agentDefault": "allow", "requires": ["page.input"], "scope": "tabId", "x-note": "Если поле имеет type=password — требуется credential.fill; прямой ввод текста в password-поле = POLICY_DENIED (default-deny).",
+      "params": { "type": "object", "required": ["target", "text"], "additionalProperties": false, "properties": { "target": { "$ref": "#/$defs/Target" }, "text": { "type": "string", "maxLength": 10000 }, "clear": { "type": "boolean", "default": true }, "submit": { "type": "boolean", "default": false }, "slowlyMs": { "type": "integer", "minimum": 0, "maximum": 500 } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.press", "mcp": "page_press", "risk": "write", "agentDefault": "allow", "requires": ["page.input"], "scope": "tabId",
+      "params": { "type": "object", "required": ["key"], "additionalProperties": false, "properties": { "key": { "type": "string", "maxLength": 32, "description": "DOM KeyboardEvent.key, напр. Enter, Control+A" }, "target": { "$ref": "#/$defs/Target" } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.scroll", "mcp": "page_scroll", "risk": "write", "agentDefault": "allow", "requires": ["page.input"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "target": { "$ref": "#/$defs/Target" }, "dx": { "type": "integer", "default": 0 }, "dy": { "type": "integer", "default": 0 }, "toRef": { "$ref": "common.schema.json#/$defs/ref" } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.select", "mcp": "page_select", "risk": "write", "agentDefault": "allow", "requires": ["page.input"], "scope": "tabId",
+      "params": { "type": "object", "required": ["target", "values"], "additionalProperties": false, "properties": { "target": { "$ref": "#/$defs/Target" }, "values": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string" } } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.hover", "mcp": "page_hover", "risk": "write", "agentDefault": "allow", "requires": ["page.input"], "scope": "tabId",
+      "params": { "type": "object", "required": ["target"], "additionalProperties": false, "properties": { "target": { "$ref": "#/$defs/Target" } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.upload", "mcp": "page_upload", "risk": "sensitive", "agentDefault": "confirm", "requires": ["page.upload"], "scope": "tabId",
+      "params": { "type": "object", "required": ["target", "files"], "additionalProperties": false, "properties": { "target": { "$ref": "#/$defs/Target" }, "files": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "object", "required": ["stagedId"], "properties": { "stagedId": { "type": "string", "description": "Файл, ранее положенный в карантинную папку Anubis (из Control Center или пользователем). Произвольные локальные пути запрещены." } } } } } },
+      "result": { "$ref": "#/$defs/ActionResult" }
+    },
+    {
+      "name": "page.wait", "mcp": "page_wait", "risk": "read", "agentDefault": "allow", "requires": ["page.snapshot"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "ref": { "$ref": "common.schema.json#/$defs/ref" }, "text": { "type": "string", "maxLength": 500 }, "selector": { "type": "string", "maxLength": 500 }, "urlPattern": { "type": "string", "maxLength": 500 }, "networkIdle": { "type": "boolean" }, "state": { "enum": ["visible", "hidden", "attached", "detached"], "default": "visible" }, "timeoutMs": { "$ref": "common.schema.json#/$defs/timeoutMs" } }, "minProperties": 1 },
+      "result": { "type": "object", "properties": { "matched": { "type": "string" }, "elapsedMs": { "type": "integer" } } }
+    },
+    {
+      "name": "page.extract", "mcp": "page_extract", "risk": "read", "agentDefault": "allow", "requires": ["page.snapshot"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "what": { "enum": ["text", "links", "tables", "forms", "meta"], "default": "text" }, "scopeRef": { "$ref": "common.schema.json#/$defs/ref" }, "maxBytes": { "type": "integer", "maximum": 1048576, "default": 131072 } } },
+      "result": { "type": "object", "required": ["data", "untrusted"], "properties": { "data": {}, "truncated": { "type": "boolean" }, "untrusted": { "const": true } } }
+    },
+    {
+      "name": "page.evaluate", "mcp": "page_evaluate", "risk": "dangerous", "agentDefault": "deny", "requires": ["page.evaluate"], "scope": "tabId",
+      "params": { "type": "object", "required": ["expression"], "additionalProperties": false, "properties": { "expression": { "type": "string", "maxLength": 20000 }, "awaitPromise": { "type": "boolean", "default": true }, "world": { "enum": ["main", "isolated"], "default": "isolated" } } },
+      "result": { "type": "object", "properties": { "value": {}, "type": { "type": "string" }, "exception": { "type": "string" } } }
+    },
+    {
+      "name": "cookies.export", "mcp": "cookies_export", "risk": "sensitive", "agentDefault": "deny", "requires": ["cookies"], "scope": "browserId", "x-note": "Только через CDP Storage.getCookies/Network.getAllCookies. Значения cookie НЕ возвращаются агенту, если не включён mode=values и явное подтверждение человека; по умолчанию — вывод в зашифрованный файл на ПК.",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "domains": { "type": "array", "maxItems": 100, "items": { "type": "string" } }, "mode": { "enum": ["metadata", "file", "values"], "default": "metadata" }, "encryptTo": { "type": "string", "description": "Идентификатор локального назначения (stagedId/vault), не путь." } } },
+      "result": { "type": "object", "required": ["count"], "properties": { "count": { "type": "integer" }, "cookies": { "type": "array", "items": { "$ref": "#/$defs/Cookie" } }, "artifactId": { "type": "string" } } }
+    },
+    {
+      "name": "cookies.import", "mcp": "cookies_import", "risk": "sensitive", "agentDefault": "deny", "requires": ["cookies"], "scope": "browserId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "cookies": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/Cookie" } }, "artifactId": { "type": "string" }, "reload": { "type": "boolean", "default": false } }, "oneOf": [{ "required": ["cookies"] }, { "required": ["artifactId"] }] },
+      "result": { "type": "object", "properties": { "imported": { "type": "integer" }, "skipped": { "type": "integer" } } }
+    },
+    {
+      "name": "history.list", "mcp": "history_list", "risk": "sensitive", "agentDefault": "confirm", "requires": ["history"], "scope": "browserId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }, "since": { "$ref": "common.schema.json#/$defs/timestamp" }, "until": { "$ref": "common.schema.json#/$defs/timestamp" } } },
+      "result": { "type": "object", "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/HistoryItem" } } } }
+    },
+    {
+      "name": "history.search", "mcp": "history_search", "risk": "sensitive", "agentDefault": "confirm", "requires": ["history"], "scope": "browserId",
+      "params": { "type": "object", "required": ["query"], "additionalProperties": false, "properties": { "query": { "type": "string", "maxLength": 200 }, "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 50 } } },
+      "result": { "type": "object", "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/HistoryItem" } } } }
+    },
+    {
+      "name": "history.clear", "mcp": "history_clear", "risk": "dangerous", "agentDefault": "deny", "requires": ["history"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "additionalProperties": false, "properties": { "since": { "$ref": "common.schema.json#/$defs/timestamp" }, "until": { "$ref": "common.schema.json#/$defs/timestamp" } } },
+      "result": { "type": "object", "properties": { "cleared": { "type": "boolean" } } }
+    },
+    {
+      "name": "passwords.import", "mcp": "passwords_import", "risk": "dangerous", "agentDefault": "deny", "requires": ["passwords.ui"], "scope": "browserId", "x-note": "Только открытие штатной страницы импорта браузера (chrome://password-manager/settings / edge://wallet/passwords) и выбор CSV, подготовленного ЛОКАЛЬНО пользователем. Содержимое CSV агенту недоступно.",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "stagedId": { "type": "string", "description": "CSV в карантинной папке; агент знает только id." } }, "required": ["stagedId"] },
+      "result": { "type": "object", "properties": { "state": { "enum": ["awaiting_user", "done", "cancelled"] }, "userActionRequired": { "type": "boolean" } } }
+    },
+    {
+      "name": "passwords.export", "mcp": "passwords_export", "risk": "dangerous", "agentDefault": "deny", "requires": ["passwords.ui"], "scope": "browserId", "x-note": "Открывает штатный экспорт браузера; подтверждение паролем ОС выполняет человек у ПК. Файл CSV сразу шифруется Anubis (age/AES-GCM, ключ в хранилище ОС) и не отдаётся в API; возвращается artifactId и метаданные.",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "encryptTo": { "type": "string" } } },
+      "result": { "type": "object", "properties": { "state": { "enum": ["awaiting_user", "done", "cancelled", "timeout"] }, "artifactId": { "type": "string" }, "rows": { "type": "integer" } } }
+    },
+    {
+      "name": "storage.get", "mcp": "storage_get", "risk": "sensitive", "agentDefault": "deny", "requires": ["storage"], "scope": "tabId",
+      "params": { "type": "object", "required": ["kind"], "additionalProperties": false, "properties": { "kind": { "enum": ["localStorage", "sessionStorage", "indexedDB.names"] }, "keys": { "type": "array", "items": { "type": "string" } } } },
+      "result": { "type": "object", "properties": { "entries": { "type": "object", "additionalProperties": { "type": "string" } }, "untrusted": { "const": true } } }
+    },
+    {
+      "name": "storage.set", "mcp": "storage_set", "risk": "sensitive", "agentDefault": "deny", "requires": ["storage"], "scope": "tabId",
+      "params": { "type": "object", "required": ["kind", "entries"], "additionalProperties": false, "properties": { "kind": { "enum": ["localStorage", "sessionStorage"] }, "entries": { "type": "object", "maxProperties": 100, "additionalProperties": { "type": "string", "maxLength": 100000 } } } },
+      "result": { "type": "object", "properties": { "set": { "type": "integer" } } }
+    },
+    {
+      "name": "storage.clear", "mcp": "storage_clear", "risk": "dangerous", "agentDefault": "deny", "requires": ["storage"], "scope": "tabId", "idempotent": true,
+      "params": { "type": "object", "required": ["origin"], "additionalProperties": false, "properties": { "origin": { "$ref": "common.schema.json#/$defs/origin" }, "types": { "type": "array", "items": { "enum": ["cookies", "local_storage", "indexeddb", "cache", "service_workers"] } } } },
+      "result": { "type": "object", "properties": { "cleared": { "type": "boolean" } } }
+    },
+    {
+      "name": "downloads.list", "mcp": "downloads_list", "risk": "read", "agentDefault": "allow", "requires": ["downloads"], "scope": "browserId",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "limit": { "type": "integer", "maximum": 200, "default": 50 } } },
+      "result": { "type": "object", "properties": { "items": { "type": "array", "items": { "type": "object", "properties": { "downloadId": { "type": "string" }, "fileName": { "type": "string" }, "url": { "type": "string" }, "state": { "enum": ["in_progress", "completed", "interrupted", "blocked"] }, "bytes": { "type": "integer" }, "sha256": { "type": "string" }, "artifactId": { "type": "string" } } } } } }
+    },
+    {
+      "name": "extension.list", "mcp": "extension_list", "risk": "read", "agentDefault": "allow", "requires": ["extensions"], "scope": "browserId",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "properties": { "extensions": { "type": "array", "items": { "$ref": "#/$defs/ExtensionInfo" } } } }
+    },
+    {
+      "name": "extension.install", "mcp": "extension_install", "risk": "dangerous", "agentDefault": "deny", "requires": ["extensions.loadUnpacked"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "required": ["source"], "additionalProperties": false, "properties": { "source": { "oneOf": [
+        { "type": "object", "required": ["type", "catalogId"], "properties": { "type": { "const": "catalog" }, "catalogId": { "type": "string" } } },
+        { "type": "object", "required": ["type", "stagedId"], "properties": { "type": { "const": "unpacked" }, "stagedId": { "type": "string" } } },
+        { "type": "object", "required": ["type", "stagedId", "sha256"], "properties": { "type": { "const": "crx" }, "stagedId": { "type": "string" }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" } } }
+      ] }, "enableInIncognito": { "type": "boolean", "default": false } } },
+      "result": { "type": "object", "properties": { "extension": { "$ref": "#/$defs/ExtensionInfo" }, "method": { "enum": ["cdp.loadUnpacked", "policy.forcelist", "profile-seed"] }, "restartRequired": { "type": "boolean" } } }
+    },
+    {
+      "name": "extension.enable", "mcp": "extension_enable", "risk": "write", "agentDefault": "confirm", "requires": ["extensions"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "required": ["extensionId"], "additionalProperties": false, "properties": { "extensionId": { "$ref": "common.schema.json#/$defs/extensionId" } } },
+      "result": { "type": "object", "properties": { "extension": { "$ref": "#/$defs/ExtensionInfo" } } }
+    },
+    {
+      "name": "extension.disable", "mcp": "extension_disable", "risk": "write", "agentDefault": "allow", "requires": ["extensions"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "required": ["extensionId"], "additionalProperties": false, "properties": { "extensionId": { "$ref": "common.schema.json#/$defs/extensionId" } } },
+      "result": { "type": "object", "properties": { "extension": { "$ref": "#/$defs/ExtensionInfo" } } }
+    },
+    {
+      "name": "extension.remove", "mcp": "extension_remove", "risk": "dangerous", "agentDefault": "deny", "requires": ["extensions.loadUnpacked"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "required": ["extensionId"], "additionalProperties": false, "properties": { "extensionId": { "$ref": "common.schema.json#/$defs/extensionId" } } },
+      "result": { "type": "object", "properties": { "removed": { "type": "boolean" } } }
+    },
+    {
+      "name": "devMode.set", "mcp": "devmode_set", "risk": "dangerous", "agentDefault": "deny", "requires": ["devMode"], "scope": "browserId", "idempotent": true,
+      "params": { "type": "object", "required": ["enabled"], "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
+      "result": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "method": { "enum": ["launch-flag", "ui-toggle", "policy", "preferences-mac"] }, "restartRequired": { "type": "boolean" } } }
+    },
+    {
+      "name": "credential.list", "mcp": "credential_list", "risk": "read", "agentDefault": "allow", "requires": ["credentials"], "x-note": "Добавлена к плану: агент должен знать, какие ссылки существуют. Возвращает только метаданные.",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "origin": { "$ref": "common.schema.json#/$defs/origin" } } },
+      "result": { "type": "object", "properties": { "credentials": { "type": "array", "items": { "type": "object", "required": ["ref", "label", "origins"], "properties": { "ref": { "$ref": "common.schema.json#/$defs/credentialRef" }, "label": { "type": "string" }, "usernameHint": { "type": "string", "description": "Маскированный логин, напр. a***@example.com" }, "origins": { "type": "array", "items": { "type": "string" } }, "hasTotp": { "type": "boolean" } } } } } }
+    },
+    {
+      "name": "credential.fill", "mcp": "credential_fill", "risk": "sensitive", "agentDefault": "confirm", "requires": ["credentials"], "scope": "tabId",
+      "params": { "type": "object", "required": ["ref"], "additionalProperties": false, "properties": { "ref": { "$ref": "common.schema.json#/$defs/credentialRef" }, "usernameTarget": { "$ref": "#/$defs/Target" }, "passwordTarget": { "$ref": "#/$defs/Target" }, "fields": { "type": "array", "items": { "enum": ["username", "password", "totp"] }, "default": ["username", "password"] }, "submit": { "type": "boolean", "default": false } } },
+      "result": { "type": "object", "properties": { "filled": { "type": "array", "items": { "enum": ["username", "password", "totp"] } }, "origin": { "type": "string" } } }
+    },
+    {
+      "name": "lease.acquire", "mcp": "lease_acquire", "risk": "write", "agentDefault": "allow", "requires": [], "x-note": "Эксклюзивное управление браузером/вкладкой на время задачи; нужен для режима человек<->агент.",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "ttlMs": { "type": "integer", "minimum": 5000, "maximum": 3600000, "default": 120000 }, "scope": { "enum": ["browser", "tab"], "default": "browser" } } },
+      "result": { "type": "object", "required": ["leaseId", "expiresAt"], "properties": { "leaseId": { "type": "string" }, "expiresAt": { "type": "string", "format": "date-time" } } }
+    },
+    {
+      "name": "lease.release", "mcp": "lease_release", "risk": "write", "agentDefault": "allow", "requires": [], "idempotent": true,
+      "params": { "type": "object", "required": ["leaseId"], "additionalProperties": false, "properties": { "leaseId": { "type": "string" } } },
+      "result": { "type": "object", "properties": { "released": { "type": "boolean" } } }
+    }
+  ]
+}
