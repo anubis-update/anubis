@@ -10,6 +10,7 @@ import {
   mergeVault
 } from './browser-profile'
 import { buildEngineOptions, PROFILE_NOTE } from './engine-options'
+import BrowserHubPanel from './browser-hub-panel'
 
 const { Title, Text } = Typography
 const VAULT_KEY = 'anubisBrowserVault'
@@ -275,7 +276,7 @@ export default function BrowserPanel ({
     <div className='browser-tools-panel'>
       <Collapse
         size='small'
-        items={[{ key: 'tools', label: 'Browser tools', children: sections }]}
+        items={[\n          { key: 'tools', label: 'Browser tools', children: sections },\n          { key: 'hub', label: 'Browser Hub', children: <BrowserHubPanel /> }\n        ]}
       />
       <Modal
         title='Save profile'
