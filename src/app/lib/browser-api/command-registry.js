@@ -105,7 +105,7 @@ function createDispatcher ({
   async function execute (req, actor = { id: 'anonymous', role: 'agent', kind: 'agent' }) {
     const started = now()
     const requestId = req && typeof req.requestId === 'string' ? req.requestId : 'invalid'
-    const audit1 = { deviceId, actor: { kind: actor.kind || actor.role, id: actor.id }, transport, requestId }
+    const audit1 = { deviceId, actor: { kind: actor.kind || actor.role, id: actor.id }, transport: actor.transport || transport, requestId }
     let def
     let decision = { effect: 'deny', rule: 'n/a' }
     let origin

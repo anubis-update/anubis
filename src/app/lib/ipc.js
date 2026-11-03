@@ -356,9 +356,34 @@ function initBrowserApi (config = {}, child) {
   })
   globalState.set('browserApi', api)
   const tokens = createTokenStore()
+  let controlCenter = null
+  const ccEnabled = (config.controlCenterEnabled === true || process.env.ANUBIS_CC === '1') && process.env.ANUBIS_CC_KILL !== '1'
+  if (ccEnabled) {
+    const { createControlChannel, defaultPost } = require('./browser-api/control-channel')
+    const { createControlStore } = require('./browser-api/control-channel-store')
+    const ccStore = createControlStore({
+      io: { read: () => readJson('control-center.json'), write: (d) => writeJson('control-center.json', d) },
+      protect: safeEncrypt,
+      unprotect: safeDecrypt
+    })
+    controlCenter = createControlChannel({
+      api,
+      store: ccStore,
+      WebSocket: require('ws'),
+      post: defaultPost,
+      enabled: true,
+      url: config.controlCenterUrl || process.env.ANUBIS_CC_URL,
+      deviceInfo: () => ({ deviceId: require('os').hostname(), anubisVersion: app.getVersion() }),
+      log: (...a) => log.info(...a)
+    })
+    if (config.controlCenterAutoConnect === true && ccStore.identity() && !ccStore.killed()) {
+      try { controlCenter.connect() } catch (e) { log.error('control center connect failed', e && e.code) }
+    }
+  }
   const hubController = createBrowserHubController({
     api,
     tokens,
+    controlCenter,
     send: (channel, ev) => {
       const win = globalState.get('win')
       if (win && !win.isDestroyed()) win.webContents.send(channel, ev)

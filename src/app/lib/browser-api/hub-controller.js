@@ -17,7 +17,7 @@ const EVENT_CHANNEL = 'browserHub:event'
 
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v)
 
-function createBrowserHubController ({ api, tokens, send = () => {}, crypto = require('node:crypto') } = {}) {
+function createBrowserHubController ({ api, tokens, send = () => {}, crypto = require('node:crypto'), controlCenter = null } = {}) {
   if (!api || !tokens) throw new TypeError('browserHub controller requires api and tokens')
   let unregister = null
   let unsubscribe = null
@@ -34,7 +34,20 @@ function createBrowserHubController ({ api, tokens, send = () => {}, crypto = re
     unsubscribe = null
   }
 
+  const needCc = () => {
+    if (!controlCenter) throw apiError('DISABLED', 'Control Center channel is disabled')
+    return controlCenter
+  }
+
   const actions = {
+    'controlCenter.status': () => controlCenter ? controlCenter.status() : { enabled: false, state: 'disabled', enrolled: false },
+    'controlCenter.enroll': (p) => needCc().enroll({ token: needObj(p).token, deviceName: p.deviceName }),
+    'controlCenter.connect': () => needCc().connect(),
+    'controlCenter.disconnect': () => needCc().disconnect(),
+    'controlCenter.kill': () => needCc().kill(),
+    'controlCenter.resume': () => needCc().resume(),
+    'controlCenter.forget': () => needCc().forget(),
+
     status () {
       return {
         enabled: true,
@@ -43,6 +56,7 @@ function createBrowserHubController ({ api, tokens, send = () => {}, crypto = re
         allowExtensionInstall: api.policy.extensions().allowInstall === true,
         pendingConfirmations: api.confirmations.list().length,
         approverRegistered: !!unregister,
+        controlCenter: controlCenter ? controlCenter.status() : { enabled: false, state: 'disabled' },
         stagingRoot: api.staging ? api.staging.root() : null
       }
     },
@@ -128,6 +142,7 @@ function createBrowserHubController ({ api, tokens, send = () => {}, crypto = re
     },
     dispose () {
       stopEvents()
+      if (controlCenter) controlCenter.dispose()
       if (unregister) unregister()
       unregister = null
     },
