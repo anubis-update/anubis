@@ -44,6 +44,20 @@ test('managed Web session: unsupported browserHub maps to REMOTE_UNSUPPORTED', a
   await assert.rejects(hub.status(), { code: 'REMOTE_UNSUPPORTED' })
 })
 
+test('managed Web RPC forwards browserHub to the desktop controller', async () => {
+  const { createBrowserRpc } = require('../../app/lib/managed-browser-rpc')
+  const calls = []
+  const rpc = createBrowserRpc({
+    functions: { browserHub: async (action, payload) => { calls.push([action, payload]); return { ok: true, result: { x: 1 } } } },
+    getConfig: () => ({}),
+    getPassword: async () => ({}),
+    constants: () => ({}),
+    init: async () => ({ config: {} })
+  })
+  assert.deepEqual(await rpc('browserHub', ['status', {}]), { ok: true, result: { x: 1 } })
+  assert.deepEqual(calls, [['status', {}]])
+})
+
 test('policy.setRule tolerates a missing policy', () => {
   assert.equal(policy.setRule(null, 'agent', 'tab.open', 'allow'), null)
 })

@@ -454,7 +454,7 @@ export default function BrowserHubPanel () {
   if (remoteOnly) {
     return (
       <div className='browser-hub-panel'>
-        <Alert type='info' showIcon message='Browser Hub is available only in the local Anubis app on this PC. Remote Web sessions cannot manage it.' />
+        <Alert type='info' showIcon message='This device runs a version without Browser Hub support. Update Anubis on the device.' />
       </div>
     )
   }

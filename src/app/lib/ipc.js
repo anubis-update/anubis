@@ -293,11 +293,14 @@ function initCdpBrowser (child) {
   child.once('disconnect', () => cdp.disposeAll())
 }
 
-// Browser Hub (/v1 API + MCP tools). OFF by default: enabled only with
-// config.browserApiEnabled or ANUBIS_BROWSER_API=1. Binds 127.0.0.1 only; the
-// bearer token is written to a user-only file, never logged.
+// Browser Hub. The Hub controller (used by the app UI, including managed Web
+// sessions) is ON unless config.browserApiEnabled === false. The external /v1
+// API + MCP listener stays OFF by default: enabled only with
+// config.browserApiEnabled === true or ANUBIS_BROWSER_API=1. It binds
+// 127.0.0.1 only; the bearer token is written to a user-only file, never logged.
 function initBrowserApi (config = {}, child) {
-  if (!(config.browserApiEnabled === true || process.env.ANUBIS_BROWSER_API === '1')) return
+  if (config.browserApiEnabled === false) return
+  const v1Enabled = config.browserApiEnabled === true || process.env.ANUBIS_BROWSER_API === '1'
   const { createCdpLaunch, createPipeTransport, createWsTransport, readDevToolsPort, copyProfileTolerant } = require('./cdp-launch')
   const { createBrowserApi } = require('./browser-api')
   const { createV1Server, createTokenStore } = require('./browser-api/v1-api')
@@ -390,14 +393,17 @@ function initBrowserApi (config = {}, child) {
     }
   })
   globalState.set('browserHub', hubController)
-  const { WebSocketServer } = require('ws')
-  const server = createV1Server({ api, tokens, WebSocketServer })
-  server.start().then(({ host, port }) => {
-    nodeFs.mkdirSync(hubRoot, { recursive: true })
-    const agentToken = tokens.issue('agent', 24 * 3600 * 1000)
-    nodeFs.writeFileSync(nodePath.join(hubRoot, 'browser-api.json'), JSON.stringify({ host, port, token: agentToken }), { mode: 0o600 })
-  }).catch((e) => log.error('browser api listen failed', e && e.message))
-  if (child) child.once('disconnect', () => { hubController.dispose(); server.stop(); api.shutdown() })
+  let server = null
+  if (v1Enabled) {
+    const { WebSocketServer } = require('ws')
+    server = createV1Server({ api, tokens, WebSocketServer })
+    server.start().then(({ host, port }) => {
+      nodeFs.mkdirSync(hubRoot, { recursive: true })
+      const agentToken = tokens.issue('agent', 24 * 3600 * 1000)
+      nodeFs.writeFileSync(nodePath.join(hubRoot, 'browser-api.json'), JSON.stringify({ host, port, token: agentToken }), { mode: 0o600 })
+    }).catch((e) => log.error('browser api listen failed', e && e.message))
+  }
+  if (child) child.once('disconnect', () => { hubController.dispose(); if (server) server.stop(); api.shutdown() })
 }
 
 function initIpc () {
