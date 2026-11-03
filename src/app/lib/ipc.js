@@ -329,16 +329,42 @@ function initBrowserApi (config = {}, child) {
     log
   })
   const localAppData = process.env.LOCALAPPDATA || ''
+  const readJson = (file) => {
+    try { return JSON.parse(nodeFs.readFileSync(nodePath.join(hubRoot, file), 'utf8')) } catch { return null }
+  }
+  const writeJson = (file, obj) => {
+    nodeFs.mkdirSync(hubRoot, { recursive: true })
+    const target = nodePath.join(hubRoot, file)
+    if (obj === null) { nodeFs.rmSync(target, { force: true }); return }
+    nodeFs.writeFileSync(target, JSON.stringify(obj), { mode: 0o600 })
+  }
+  const { createStaging } = require('./browser-api/staging')
+  const { createDevModePolicyReader } = require('./cdp-extensions')
+  const { createBrowserHubController } = require('./browser-api/hub-controller')
+  const staging = createStaging({ root: nodePath.join(hubRoot, 'staging') })
   const api = createBrowserApi({
     launchBrowser,
     resolveSourceDir: (engine) => engine === 'edge'
       ? nodePath.join(localAppData, 'Microsoft', 'Edge', 'User Data')
       : nodePath.join(localAppData, 'Google', 'Chrome', 'User Data'),
     auditDir: nodePath.join(hubRoot, 'audit'),
+    staging,
+    policyIo: { read: () => readJson('policy.json'), write: (d) => writeJson('policy.json', d) },
+    catalogIo: { persist: { read: () => readJson('profiles-selected.json'), write: (d) => writeJson('profiles-selected.json', d) } },
+    readDevModePolicy: createDevModePolicyReader({ execFileSync: require('node:child_process').execFileSync }),
     deviceInfo: () => ({ deviceId: require('os').hostname(), anubisVersion: app.getVersion() })
   })
   globalState.set('browserApi', api)
   const tokens = createTokenStore()
+  const hubController = createBrowserHubController({
+    api,
+    tokens,
+    send: (channel, ev) => {
+      const win = globalState.get('win')
+      if (win && !win.isDestroyed()) win.webContents.send(channel, ev)
+    }
+  })
+  globalState.set('browserHub', hubController)
   const { WebSocketServer } = require('ws')
   const server = createV1Server({ api, tokens, WebSocketServer })
   server.start().then(({ host, port }) => {
@@ -346,7 +372,7 @@ function initBrowserApi (config = {}, child) {
     const agentToken = tokens.issue('agent', 24 * 3600 * 1000)
     nodeFs.writeFileSync(nodePath.join(hubRoot, 'browser-api.json'), JSON.stringify({ host, port, token: agentToken }), { mode: 0o600 })
   }).catch((e) => log.error('browser api listen failed', e && e.message))
-  if (child) child.once('disconnect', () => { server.stop(); api.shutdown() })
+  if (child) child.once('disconnect', () => { hubController.dispose(); server.stop(); api.shutdown() })
 }
 
 function initIpc () {
@@ -408,6 +434,12 @@ function initIpc () {
   })
   const asyncGlobals = {
     getHardwareInventory: () => require('@ai-security-tool/managed-access/hardware-inventory').getHardwareInventory(),
+    browserHub: (action, payload) => {
+      const hub = globalState.get('browserHub')
+      return hub
+        ? hub.handle(action, payload)
+        : { ok: false, error: { code: 'DISABLED', message: 'Browser Hub is disabled (set browserApiEnabled or ANUBIS_BROWSER_API=1)' } }
+    },
     getManagedConnectivity: () => globalState.get('managedConnectivity') || { status: 'offline' },
     activateBrowser: (key) => {
       const fn = globalState.get('managedActivate')
