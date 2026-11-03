@@ -22,10 +22,18 @@ function profileIdFor (engine, dir) {
 function createProfileCatalog ({
   readFile = (p) => fs.readFileSync(p, 'utf8'),
   exists = (p) => fs.existsSync(p),
-  resolveSourceDir
+  resolveSourceDir,
+  persist
 } = {}) {
   const dirs = new Map() // profileId -> { engine, dir }
   const selected = new Map() // engine -> profileId
+  // persist = { read(): object, write(obj) } keeps only opaque ids per engine.
+  try {
+    const saved = persist && persist.read()
+    for (const engine of Object.keys(saved || {})) {
+      if (/^[a-z]{1,16}$/.test(engine) && /^p_[0-9a-f]{10}$/.test(String(saved[engine]))) selected.set(engine, saved[engine])
+    }
+  } catch {}
 
   function enumerate (engine) {
     const root = resolveSourceDir ? resolveSourceDir(engine) : null
@@ -67,10 +75,26 @@ function createProfileCatalog ({
     const e = dirs.get(profileId)
     if (!e || e.engine !== engine) return false
     selected.set(engine, profileId)
+    if (persist) {
+      try { persist.write(Object.fromEntries(selected)) } catch {}
+    }
     return true
   }
 
-  return { enumerate, resolve, select, selected: (engine) => selected.get(engine) || null }
+  // A persisted selection is only valid if the profile still exists.
+  function selectedFor (engine) {
+    const id = selected.get(engine)
+    if (!id) return null
+    if (!dirs.has(id)) enumerate(engine)
+    const e = dirs.get(id)
+    if (!e || e.engine !== engine) {
+      selected.delete(engine)
+      return null
+    }
+    return id
+  }
+
+  return { enumerate, resolve, select, selected: selectedFor }
 }
 
 module.exports = { createProfileCatalog, maskEmail, profileIdFor }

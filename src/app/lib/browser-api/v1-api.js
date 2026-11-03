@@ -16,10 +16,21 @@ function hashToken (t) {
 
 function createTokenStore ({ now = () => Date.now() } = {}) {
   const entries = []
+  const prune = () => {
+    for (let i = entries.length - 1; i >= 0; i--) if (entries[i].expiresAt <= now()) entries.splice(i, 1)
+  }
   return {
-    issue (role = 'agent', ttlMs = 24 * 3600 * 1000) {
+    issue (role = 'agent', ttlMs = 24 * 3600 * 1000, { label } = {}) {
+      prune()
       const token = 'abt_' + crypto.randomBytes(24).toString('hex')
-      entries.push({ hash: hashToken(token), role, expiresAt: now() + ttlMs, id: 'tok_' + crypto.randomBytes(4).toString('hex') })
+      entries.push({
+        hash: hashToken(token),
+        role,
+        expiresAt: now() + ttlMs,
+        createdAt: now(),
+        label: typeof label === 'string' ? label.slice(0, 60) : undefined,
+        id: 'tok_' + crypto.randomBytes(4).toString('hex')
+      })
       return token
     },
     verify (token) {
@@ -29,6 +40,23 @@ function createTokenStore ({ now = () => Date.now() } = {}) {
         if (crypto.timingSafeEqual(e.hash, h) && e.expiresAt > now()) return { id: e.id, role: e.role, kind: e.role }
       }
       return null
+    },
+    // Never includes the token or its hash.
+    list () {
+      prune()
+      return entries.map((e) => ({
+        id: e.id,
+        role: e.role,
+        ...(e.label ? { label: e.label } : {}),
+        createdAt: new Date(e.createdAt).toISOString(),
+        expiresAt: new Date(e.expiresAt).toISOString()
+      }))
+    },
+    revoke (id) {
+      const i = entries.findIndex((e) => e.id === id)
+      if (i < 0) return false
+      entries.splice(i, 1)
+      return true
     },
     revokeAll () { entries.length = 0 }
   }
