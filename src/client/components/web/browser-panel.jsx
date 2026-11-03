@@ -276,7 +276,10 @@ export default function BrowserPanel ({
     <div className='browser-tools-panel'>
       <Collapse
         size='small'
-        items={[\n          { key: 'tools', label: 'Browser tools', children: sections },\n          { key: 'hub', label: 'Browser Hub', children: <BrowserHubPanel /> }\n        ]}
+        items={[
+          { key: 'tools', label: 'Browser tools', children: sections },
+          { key: 'hub', label: 'Browser Hub', children: <BrowserHubPanel /> }
+        ]}
       />
       <Modal
         title='Save profile'
