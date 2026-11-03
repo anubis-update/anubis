@@ -74,11 +74,11 @@ function createAuditLog ({ fsApi, dir, now = () => Date.now(), retainDays = 90 }
 
   function record (entry) {
     const t = now()
-    const base = { id: ulid(t), ts: new Date(t).toISOString(), ...entry }
-    if (base.params !== undefined) base.params = sanitize(base.params)
-    if (base.result !== undefined) base.result = sanitize(base.result)
+    const base = { v: 1, id: ulid(t), ts: new Date(t).toISOString(), ...entry }
+    if (base.paramsDigest !== undefined) base.paramsDigest = sanitize(base.paramsDigest)
+    if (base.outcome && base.outcome.resultDigest !== undefined) base.outcome = { ...base.outcome, resultDigest: digest(base.outcome.resultDigest) }
     const prevForRec = lastHash()
-    const hash = crypto.createHash('sha256').update(prevForRec + canonical(base)).digest('hex')
+    const hash = crypto.createHash('sha256').update(prevForRec + canonical({ ...base, prevHash: prevForRec })).digest('hex')
     const rec = { ...base, prevHash: prevForRec, hash }
     io.append(base.ts.slice(0, 10) + '.jsonl', JSON.stringify(rec) + '\n')
     prevHash = rec.hash
@@ -92,7 +92,8 @@ function createAuditLog ({ fsApi, dir, now = () => Date.now(), retainDays = 90 }
       for (const line of io.read(f).split('\n').filter(Boolean)) {
         let r
         try { r = JSON.parse(line) } catch { return { ok: false, count, brokenAt: count } }
-        const { hash, prevHash: ph, ...base } = r
+        const { hash, ...base } = r
+        const ph = r.prevHash
         if (prev !== null && ph !== prev) return { ok: false, count, brokenAt: count }
         if (crypto.createHash('sha256').update(ph + canonical(base)).digest('hex') !== hash) return { ok: false, count, brokenAt: count }
         prev = hash

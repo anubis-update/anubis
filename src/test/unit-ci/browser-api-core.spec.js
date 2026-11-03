@@ -1,4 +1,4 @@
-const { test } = require('node:test')
+﻿const { test } = require('node:test')
 const assert = require('node:assert/strict')
 const { createRedactor } = require('../../app/lib/browser-api/redactor')
 const { createPolicyEngine, isPrivateHost, DEFAULT_POLICY } = require('../../app/lib/browser-api/policy-engine')
@@ -97,8 +97,8 @@ function memFs () {
 test('audit: hash chain verifies, tamper detected, sensitive params digested', () => {
   const fsApi = memFs()
   const a = createAuditLog({ fsApi, now: () => Date.parse('2025-01-02T00:00:00Z') })
-  a.record({ command: 'page.type', actor: { id: 'a' }, params: { text: 'TOPSECRET', ref: 'e1' }, outcome: 'ok' })
-  a.record({ command: 'tab.list', actor: { id: 'a' }, outcome: 'ok' })
+  a.record({ command: 'page.type', actor: { id: 'a' }, paramsDigest: { text: 'TOPSECRET', ref: 'e1' }, outcome: { ok: true } })
+  a.record({ command: 'tab.list', actor: { id: 'a' }, outcome: { ok: true } })
   const raw = [...fsApi.files.values()].join('')
   assert.ok(!raw.includes('TOPSECRET'))
   assert.equal(a.verify().ok, true)
@@ -141,3 +141,4 @@ test('confirmations: no approver -> CONFIRMATION_REQUIRED; only local token deci
   c.decide(c.list()[0].confirmationId, false, c.localToken())
   await assert.rejects(p2, (e) => e.code === 'CONFIRMATION_REJECTED')
 })
+
