@@ -264,7 +264,13 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
     return { text: text.slice(0, maxChars), truncated: text.length > maxChars, untrusted: true }
   }
 
-  async function nodeObject (tabId, { ref, snapshotId, selector }) {
+  async function nodeObject (tabId, { ref, snapshotId, selector, x, y }) {
+    if (!ref && Number.isFinite(x) && Number.isFinite(y)) {
+      const loc = await send(tabId, 'DOM.getNodeForLocation', { x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: false })
+      if (!loc || !loc.backendNodeId) throw apiError('ELEMENT_NOT_FOUND', 'No element at these coordinates')
+      const r = await send(tabId, 'DOM.resolveNode', { backendNodeId: loc.backendNodeId })
+      return { objectId: r.object.objectId, backendNodeId: loc.backendNodeId }
+    }
     if (ref) {
       const entry = resolveRef(tabId, ref, snapshotId)
       const r = await send(tabId, 'DOM.resolveNode', { backendNodeId: entry.backendNodeId })
@@ -277,8 +283,8 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
     return { objectId: r.object.objectId }
   }
 
-  async function select (tabId, { ref, snapshotId, values }) {
-    const node = await nodeObject(tabId, { ref, snapshotId })
+  async function select (tabId, { ref, snapshotId, x, y, values }) {
+    const node = await nodeObject(tabId, { ref, snapshotId, x, y })
     const r = await send(tabId, 'Runtime.callFunctionOn', {
       objectId: node.objectId,
       functionDeclaration: `function(values){
@@ -299,8 +305,8 @@ function createPageDriver ({ tabs, sleep = (ms) => new Promise((resolve) => setT
   }
 
   // `files` are absolute paths already resolved by the host from quarantine ids.
-  async function upload (tabId, { ref, snapshotId, selector, files }) {
-    const node = await nodeObject(tabId, { ref, snapshotId, selector })
+  async function upload (tabId, { ref, snapshotId, selector, x, y, files }) {
+    const node = await nodeObject(tabId, { ref, snapshotId, selector, x, y })
     const check = await send(tabId, 'Runtime.callFunctionOn', {
       objectId: node.objectId,
       functionDeclaration: 'function(){return !!this && this.tagName === "INPUT" && this.type === "file"}',

@@ -61,7 +61,8 @@ const DEFAULT_POLICY = {
   },
   confirmation: { timeoutSec: 120, channel: 'local-ui', rememberMinutes: 0 },
   redaction: { maskPasswordFields: true, maskPatterns: [], stripKnownSecrets: true },
-  audit: { screenshots: 'on-sensitive', retainDays: 90 }
+  audit: { screenshots: 'on-sensitive', retainDays: 90 },
+  extensions: { allowInstall: false }
 }
 
 const STRICTNESS = { allow: 0, confirm: 1, deny: 2 }
@@ -130,6 +131,7 @@ function mergeOverlay (base, overlay) {
   if (overlay.redaction) {
     out.redaction.maskPatterns = [...(out.redaction.maskPatterns || []), ...(overlay.redaction.maskPatterns || [])]
   }
+  if (overlay.extensions && overlay.extensions.allowInstall === false) out.extensions = { ...(out.extensions || {}), allowInstall: false }
   if (overlay.confirmation && overlay.confirmation.timeoutSec) out.confirmation.timeoutSec = Math.min(out.confirmation.timeoutSec, overlay.confirmation.timeoutSec)
   return out
 }
@@ -182,6 +184,7 @@ function createPolicyEngine ({ policy = DEFAULT_POLICY, adminOverlay } = {}) {
     confirmation: () => current.confirmation,
     redaction: () => current.redaction,
     audit: () => current.audit,
+    extensions: () => ({ allowInstall: false, ...(current.extensions || {}) }),
     snapshot: () => JSON.parse(JSON.stringify(current)),
     setPolicy: (p, overlay = adminOverlay) => { current = mergeOverlay(p, overlay) }
   }
