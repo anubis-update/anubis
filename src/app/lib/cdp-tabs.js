@@ -21,6 +21,7 @@ function createTabManager ({
   client,
   idGen = newId,
   emit = () => {},
+  onSession,
   limits = {},
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now()
@@ -158,6 +159,7 @@ function createTabManager ({
           client.send('Network.enable', {}, sessionId),
           client.send('Page.setLifecycleEventsEnabled', { enabled: true }, sessionId).catch(() => {})
         ])
+        if (onSession) await onSession(sessionId, tab.tabId)
         tab.sessionId = sessionId
         return sessionId
       })().finally(() => { tab.attaching = null })
