@@ -25,7 +25,12 @@ export default function Sidebar (props) {
     openedSideBar,
     showModal,
     sidebarPanelTab,
-    isMobile
+    isMobile,
+    cveScannerOpen,
+    onOpenCveScanner,
+    dllScannerOpen,
+    onOpenWorkspace,
+    onOpenDllScanner
   } = props
 
   const { store } = window
@@ -77,6 +82,7 @@ export default function Sidebar (props) {
   }, [])
 
   const handleClickBookmark = () => {
+    onOpenWorkspace()
     if (showModal) {
       store.showModal = 0
     }
@@ -107,6 +113,11 @@ export default function Sidebar (props) {
     <div {...sidebarProps}>
       <GroupedSidebarMenu
         handleClickBookmark={handleClickBookmark}
+        onOpenWorkspace={onOpenWorkspace}
+        cveScannerOpen={cveScannerOpen}
+        onOpenCveScanner={onOpenCveScanner}
+        dllScannerOpen={dllScannerOpen}
+        onOpenDllScanner={onOpenDllScanner}
       >
         <TransferList
           fileTransfers={fileTransfers}

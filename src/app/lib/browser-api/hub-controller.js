@@ -17,7 +17,7 @@ const EVENT_CHANNEL = 'browserHub:event'
 
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v)
 
-function createBrowserHubController ({ api, tokens, send = () => {}, crypto = require('node:crypto'), controlCenter = null } = {}) {
+function createBrowserHubController ({ api, tokens, send = () => {}, crypto = require('node:crypto'), controlCenter = null, moduleBroker = null, nativePasswordTransfer = null } = {}) {
   if (!api || !tokens) throw new TypeError('browserHub controller requires api and tokens')
   let unregister = null
   let unsubscribe = null
@@ -38,9 +38,55 @@ function createBrowserHubController ({ api, tokens, send = () => {}, crypto = re
     if (!controlCenter) throw apiError('DISABLED', 'Control Center channel is disabled')
     return controlCenter
   }
+  const transferCookies = require('./cookie-transfer').createCookieTransfer({ api, actor: UI_ACTOR })
+  const passwordTransfers = require('./password-transfer').createPasswordTransfer({ api, actor: UI_ACTOR, nativeTransfer: nativePasswordTransfer })
 
   const actions = {
+    'passwords.exportFile': p => passwordTransfers.start('export', needObj(p)),
+    'passwords.importFile': p => passwordTransfers.start('import', needObj(p)),
+    'passwords.transferStatus': p => passwordTransfers.status(needObj(p)),
+    'passwords.transferResult': p => passwordTransfers.result(needObj(p)),
+    'passwords.cancelTransfer': p => passwordTransfers.cancel(needObj(p)),
+    'cookies.exportFile': p => transferCookies('export', needObj(p)),
+    'cookies.importFile': p => transferCookies('import', needObj(p)),
+    async 'passwords.openNative' (p) {
+      const { browserId, confirmed } = needObj(p)
+      if (confirmed !== true || typeof browserId !== 'string') throw apiError('INVALID_REQUEST', 'Explicit administrator confirmation is required')
+      const driver = api.hub.forBrowser(browserId)
+      const verdict = api.policy.evaluate({ role: UI_ACTOR.role, command: 'passwords.import', risk: 'sensitive', engine: driver.engine })
+      if (verdict.effect !== 'allow') throw apiError('POLICY_DENIED', 'Password management is disabled by device policy')
+      api.leases.check({ browserId, actor: UI_ACTOR.id, role: UI_ACTOR.role })
+      if (!['chrome', 'edge'].includes(driver.engine)) throw apiError('NOT_SUPPORTED_BY_ENGINE', 'Native password manager requires Chrome or Edge')
+      api.audit.record({ actor: UI_ACTOR, transport: 'admin-ui', command: 'passwords.openNative', browserId, decision: { effect: 'allow', rule: 'explicit-admin-native-ui' }, outcome: { stage: 'confirmed' } })
+      return driver.newTab(browserId, { url: driver.engine === 'edge' ? 'edge://wallet/passwords' : 'chrome://password-manager/settings', activate: true })
+    },
+    'modules.status': () => moduleBroker ? moduleBroker.status() : { configured: false, ready: false, executionEnabled: false },
+    'modules.list': () => {
+      if (!moduleBroker) throw apiError('DISABLED', 'The independent module Broker is not configured')
+      return moduleBroker.modules()
+    },
+    'modules.jobs': () => {
+      if (!moduleBroker) throw apiError('DISABLED', 'The independent module Broker is not configured')
+      return moduleBroker.jobs()
+    },
+    'modules.createJob': p => {
+      if (!moduleBroker) throw apiError('DISABLED', 'The independent module Broker is not configured')
+      return moduleBroker.createJob(needObj(p))
+    },
+    'modules.getJob': p => {
+      if (!moduleBroker) throw apiError('DISABLED', 'The independent module Broker is not configured')
+      return moduleBroker.getJob(needObj(p).jobId)
+    },
+    'modules.result': p => {
+      if (!moduleBroker) throw apiError('DISABLED', 'The independent module Broker is not configured')
+      return moduleBroker.result(needObj(p).jobId)
+    },
+    'modules.cancel': p => {
+      if (!moduleBroker) throw apiError('DISABLED', 'The independent module Broker is not configured')
+      return moduleBroker.cancel(needObj(p).jobId)
+    },
     'controlCenter.status': () => controlCenter ? controlCenter.status() : { enabled: false, state: 'disabled', enrolled: false },
+    'controlCenter.configure': (p) => needCc().configure(needObj(p)),
     'controlCenter.enroll': (p) => needCc().enroll({ token: needObj(p).token, deviceName: p.deviceName }),
     'controlCenter.connect': () => needCc().connect(),
     'controlCenter.disconnect': () => needCc().disconnect(),
@@ -141,6 +187,7 @@ function createBrowserHubController ({ api, tokens, send = () => {}, crypto = re
       }
     },
     dispose () {
+      passwordTransfers.dispose()
       stopEvents()
       if (controlCenter) controlCenter.dispose()
       if (unregister) unregister()

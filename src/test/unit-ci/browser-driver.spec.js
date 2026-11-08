@@ -84,3 +84,23 @@ test('profile selection goes through catalog and picks the directory', async () 
   await driver.launch({ profileId: 'p_x', profileMode: 'managed-copy' })
   assert.equal(launched[0].profileDirectory, 'Profile 1')
 })
+
+test('adopts Browser engine handles once and unregisters only after the last view closes', async () => {
+  const { driver, client, launched, events } = mk()
+  let closed = 0
+  const handle = { client, userDataDir: 'user-profile', profileId: 'p_shared', close: () => { closed++ } }
+  const first = await driver.attach(handle, { sessionId: 'view-one', targetId: 'T1' })
+  const second = await driver.attach(handle, { sessionId: 'view-two', targetId: 'T1' })
+  assert.equal(first.browserId, second.browserId)
+  assert.equal(launched.length, 0)
+  assert.equal(driver.listBrowsers()[0].profileId, 'p_shared')
+  assert.deepEqual(driver.listBrowsers()[0].sessionIds, ['view-one', 'view-two'])
+  driver.detachSession('view-one')
+  assert.deepEqual(driver.listBrowsers()[0].sessionIds, ['view-two'])
+  driver.detachSession('view-two')
+  assert.deepEqual(driver.listBrowsers(), [])
+  assert.equal(closed, 0, 'Detaching the Hub must not kill Browser engine')
+  const count = events.length
+  client.emit('Target.targetCreated', { targetInfo: { targetId: 'orphan', type: 'page' } })
+  assert.equal(events.length, count, 'Detached managers must not emit ghost tab events')
+})

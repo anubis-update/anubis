@@ -55,7 +55,9 @@ function createHistoryReader ({
           (where.length ? ' WHERE ' + where.join(' AND ') : '') +
           ' ORDER BY last_visit_time DESC LIMIT ?'
         args.push(Math.min(Math.max(1, limit), 500))
-        const rows = db.prepare(sql).all(...args)
+        const statement = db.prepare(sql)
+        statement.setReadBigInts(true)
+        const rows = statement.all(...args)
         return {
           available: true,
           entries: rows.map((r) => ({

@@ -84,7 +84,7 @@ function toWireError (error) {
     if (error.details && typeof error.details === 'object') out.details = error.details
     return out
   }
-  return { code: 'INTERNAL', message: 'Internal error', retryable: false }
+  return { code: error && typeof error.code === 'string' ? error.code : 'INTERNAL', message: String(error && error.message || 'Internal error').slice(0, 500), retryable: false }
 }
 
 module.exports = { ApiError, apiError, httpStatusFor, safeUrl, toWireError, HTTP_STATUS }

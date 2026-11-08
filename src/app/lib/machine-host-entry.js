@@ -184,6 +184,10 @@ async function startMachineHost (invocation) {
     const policy = invocation.mode === 'system' ? readMachinePolicy(invocation.dataDir) : { managedEnabled: false }
     if ('managedEnabled' in policy) process.env.ANUBIS_ADMIN_MANAGED_ENABLED = policy.managedEnabled ? '1' : '0'
     if (policy.managedUrl) process.env.ANUBIS_ADMIN_MANAGED_URL = policy.managedUrl
+    if (invocation.mode === 'system' && process.env.ANUBIS_CC_KILL !== '1') {
+      process.env.ANUBIS_CC = '1'
+      if (!process.env.ANUBIS_CC_URL) process.env.ANUBIS_CC_URL = 'wss://control.anubis.locker/ws/v1/device'
+    }
     globalState.set('machineRuntimeRole', invocation.mode)
     globalState.set('machineIdentity', { ...identity, pid: process.pid })
     globalState.set('app', app)
@@ -237,6 +241,10 @@ async function startMachineHost (invocation) {
     if (secured.secured !== true || secured.serverPid !== process.pid) throw failure('ERR_MACHINE_CONTROL_SECURITY')
     endpointReady = true
     if (invocation.mode === 'system') {
+      const autoEnroll = require('./browser-auto-enroll')
+      autoEnroll.ensureInstallationIdentity(app.getPath('userData'))
+      globalState.set('browserAutoEnroll', autoEnroll.browserEnrollmentHandlers(app.getPath('userData'), globalState))
+      autoEnroll.installTunnelHook(app.getPath('userData'), globalState)
       agent = require('./managed-startup').startDesktopManaged({
         app,
         child,

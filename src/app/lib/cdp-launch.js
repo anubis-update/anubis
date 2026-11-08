@@ -164,7 +164,13 @@ function createCdpClient (transport) {
     },
     on (method, cb, sessionId) {
       if (!listeners.has(method)) listeners.set(method, [])
-      listeners.get(method).push({ cb, sessionId })
+      const listener = { cb, sessionId }
+      listeners.get(method).push(listener)
+      return () => {
+        const entries = listeners.get(method)
+        const index = entries.indexOf(listener)
+        if (index >= 0) entries.splice(index, 1)
+      }
     },
     close () { try { transport.close() } catch {} }
   }
@@ -272,6 +278,7 @@ function createCdpLaunch ({
   isBrowserRunning,
   resolveUserDataDir,
   resolveHubUserDataDir,
+  resolveLaunchOptions = () => ({}),
   copyFile,
   removeDir,
   resolveSourceProfile = (browser, { env = process.env } = {}) => DEFAULT_SOURCE_PROFILE[normalizeBrowser(browser)](env),
@@ -287,6 +294,7 @@ function createCdpLaunch ({
   // Chromium user-data-dir singleton bounces into a stray visible window; the
   // real teardown only runs when the last session for that browser closes.
   const shared = new Map()
+  const closing = new Map()
 
   function makeHandle (id, key, slot, reused) {
     return {
@@ -295,15 +303,27 @@ function createCdpLaunch ({
       reused: !!reused,
       exePath: slot.exePath,
       userDataDir: slot.userDataDir,
+      profileId: slot.profileId,
+      profileDirectory: slot.profileDirectory,
+      unsafeExtensionDebugging: slot.unsafeExtensionDebugging,
       child: slot.child,
       transport: slot.transport,
       client: slot.client,
       mode: slot.mode,
+      onExit (cb) {
+        slot.child.once('exit', cb)
+        return () => slot.child.removeListener('exit', cb)
+      },
       close () {
         if (slot.refs > 0) slot.refs--
         if (slot.refs > 0) return
         slot.alive = false
         if (shared.get(key) === slot) shared.delete(key)
+        if (slot.child && slot.child.exitCode === null && slot.child.signalCode === null) {
+          const stopped = new Promise(resolve => slot.child.once('exit', resolve))
+          closing.set(key, stopped)
+          stopped.then(() => { if (closing.get(key) === stopped) closing.delete(key) })
+        }
         try { if (slot.client && slot.client.close) slot.client.close() } catch {}
         try { if (slot.transport && slot.transport.close) slot.transport.close() } catch {}
         try { if (slot.child && slot.child.kill) slot.child.kill() } catch {}
@@ -313,6 +333,17 @@ function createCdpLaunch ({
 
   async function launcher ({ id, url, width, height, browser = 'chrome' } = {}) {
     const key = normalizeBrowser(browser)
+    if (closing.has(key)) {
+      let timer
+      try {
+        await Promise.race([
+          closing.get(key),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(codedError('BROWSER_ALREADY_RUNNING', 'The previous browser is still shutting down; retry shortly')), 10000)
+          })
+        ])
+      } finally { clearTimeout(timer) }
+    }
     const exePath = detectPath(browser, { env, fsExists })
     if (!exePath) throw codedError('BROWSER_NOT_FOUND', `No ${key} installation was found`)
     const live = shared.get(key)
@@ -323,20 +354,31 @@ function createCdpLaunch ({
     if (typeof isBrowserRunning === 'function' && await isBrowserRunning(browser)) {
       throw codedError('BROWSER_ALREADY_RUNNING', `Close your running ${key} window and try again`)
     }
+    const { profileId, profileDirectory, unsafeExtensionDebugging = false } = await resolveLaunchOptions(key)
+    if (profileDirectory !== undefined && !/^[A-Za-z0-9 _-]{1,64}$/.test(profileDirectory)) {
+      throw codedError('PROFILE_NOT_FOUND', 'Invalid selected profile directory')
+    }
     const userDataDir = resolveUserDataDir(browser, { env })
-    if (typeof copyProfile === 'function') {
+    const exists = typeof fsExists === 'function' ? fsExists : fs.existsSync
+    // Re-seeding overwrites browser-owned extension state on every restart.
+    const seeded = await exists(path.join(userDataDir, profileDirectory || 'Default', 'Preferences'))
+    if (typeof copyProfile === 'function' && !seeded) {
       const source = resolveSourceProfile(browser, { env })
       if (source) {
         // Fail fast if the user profile to copy does not exist (e.g. a SYSTEM
         // session-0 runtime whose systemprofile has no browser data): spawning
         // anyway would stream an empty throwaway profile and leak the process.
         // In a user-context runtime the real profile exists, so this never trips.
-        const exists = typeof fsExists === 'function' ? await fsExists(source) : fs.existsSync(source)
-        if (!exists) {
+        if (!await exists(source)) {
           throw codedError('PROFILE_SOURCE_MISSING', `No ${key} profile was found to copy; open the browser from your user session`)
         }
         try {
-          await copyProfile(source, userDataDir)
+          if (await exists(path.join(userDataDir, 'Local State'))) {
+            const directory = profileDirectory || 'Default'
+            await copyProfile(path.join(source, directory), path.join(userDataDir, directory))
+          } else {
+            await copyProfile(source, userDataDir)
+          }
         } catch (error) {
           if (log && typeof log.warn === 'function') log.warn('CDP profile copy failed:', error && error.message)
         }
@@ -346,7 +388,7 @@ function createCdpLaunch ({
     let transport = null
     let mode = null
     if (preferPipe && typeof connectPipe === 'function') {
-      child = spawn(exePath, buildLaunchArgs({ userDataDir, width, height, pipe: true, url }), {
+      child = spawn(exePath, buildLaunchArgs({ userDataDir, width, height, pipe: true, url, profileDirectory, unsafeExtensionDebugging }), {
         stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe']
       })
       try {
@@ -360,7 +402,7 @@ function createCdpLaunch ({
       }
     }
     if (!transport) {
-      child = spawn(exePath, buildLaunchArgs({ userDataDir, width, height, pipe: false, url }), { stdio: 'ignore' })
+      child = spawn(exePath, buildLaunchArgs({ userDataDir, width, height, pipe: false, url, profileDirectory, unsafeExtensionDebugging }), { stdio: 'ignore' })
       const endpoint = await readDevToolsEndpoint(userDataDir, child)
       transport = await connectPort(endpoint)
       mode = 'port'
@@ -369,6 +411,9 @@ function createCdpLaunch ({
       key,
       exePath,
       userDataDir,
+      profileId,
+      profileDirectory,
+      unsafeExtensionDebugging,
       child,
       transport,
       // Create the CDP client ONCE per transport so a single message handler is
@@ -393,18 +438,18 @@ function createCdpLaunch ({
   // none exists we create one. Note: the CDP target `sessionId` lives at the
   // message top level and is distinct from Page.screencastFrameAck's
   // `params.sessionId` (the screencast id), which stays in params.
-  async function cdpClient (handle) {
+  async function cdpClient (handle, { targetId: selectedTargetId } = {}) {
     if (!handle || !handle.transport) throw new Error('CDP launch handle has no transport')
     const client = handle.client || createCdpClient(handle.transport)
     await client.send('Target.setDiscoverTargets', { discover: true })
-    let targetId
-    if (handle.reused) {
+    let targetId = selectedTargetId
+    if (!targetId && handle.reused) {
       // The browser is already alive (re-open/refresh). Give this session its
       // own page target (a new tab in the same window/process) so its screencast
       // is independent of any other session's page.
       const created = await client.send('Target.createTarget', { url: 'about:blank' })
       targetId = created && created.targetId
-    } else {
+    } else if (!targetId) {
       const info = await client.send('Target.getTargets')
       const targets = (info && Array.isArray(info.targetInfos)) ? info.targetInfos : []
       const page = targets.find((t) => t && t.type === 'page')
@@ -426,7 +471,9 @@ function createCdpLaunch ({
     }
     await activate()
     const rawSend = (method, params) => client.send(method, params, sessionId)
+    const subscriptions = []
     return {
+      targetId,
       // Page.startScreencast can still intermittently report the page as not
       // active right after launch; re-activate and retry a few times so the
       // stream reliably starts. The engine (cdp-browser.js) stays unchanged.
@@ -445,10 +492,17 @@ function createCdpLaunch ({
         }
         throw lastError
       },
-      on: (method, cb) => client.on(method, cb, sessionId),
+      on: (method, cb) => {
+        const off = client.on(method, cb, sessionId)
+        if (typeof off === 'function') subscriptions.push(off)
+        return off
+      },
       // Detach just this session; the shared transport/process is torn down by
       // the handle's reference-counted close().
-      close: () => { if (sessionId !== undefined) client.send('Target.detachFromTarget', { sessionId }).catch(() => {}) }
+      close: () => {
+        for (const off of subscriptions.splice(0)) off()
+        if (sessionId !== undefined) client.send('Target.detachFromTarget', { sessionId }).catch(() => {})
+      }
     }
   }
 

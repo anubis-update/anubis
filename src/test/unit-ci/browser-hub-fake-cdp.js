@@ -11,7 +11,14 @@ function createFakeCdp (handlers = {}) {
       if (h !== undefined) return h
       return {}
     },
-    on (method, cb, sessionId) { listeners.push({ method, cb, sessionId }) },
+    on (method, cb, sessionId) {
+      const listener = { method, cb, sessionId }
+      listeners.push(listener)
+      return () => {
+        const index = listeners.indexOf(listener)
+        if (index >= 0) listeners.splice(index, 1)
+      }
+    },
     emit (method, params, sessionId) {
       for (const l of listeners) {
         if (l.method !== method) continue

@@ -34,6 +34,19 @@ export function hardwareDetails (inventory) {
         memorySource: adapter.memorySource || 'Unknown'
       }))
     },
+    ...(inventory.client ? {
+      client: {
+        status: inventory.client.status,
+        collectedAt: inventory.client.collectedAt ? new Date(inventory.client.collectedAt).toISOString() : 'Not collected',
+        runtimeRole: inventory.client.role || 'Unknown',
+        securityStatus: inventory.client.security.status,
+        antivirus: inventory.client.security.products,
+        softwareStatus: inventory.client.software.status,
+        softwareScope: inventory.client.software.scope,
+        softwareTruncated: inventory.client.software.truncated,
+        installedSoftware: inventory.client.software.items.map(item => [item.name, item.version].filter(Boolean).join(' '))
+      }
+    } : {}),
     membership: {
       status: domain?.status || 'Unknown',
       source: domain?.source || 'Unknown',

@@ -11,19 +11,33 @@ function createControlStore ({ io, protect = (s) => s, unprotect = (s) => s } = 
   const load = () => {
     if (cache === undefined) {
       let doc = null
-      try { doc = io.read() } catch {}
+      try { doc = io.read() } catch {
+        throw Object.assign(new Error('Control Center identity could not be read'), { code: 'STATE_READ_FAILED' })
+      }
+      if (doc !== null && doc !== undefined && (typeof doc !== 'object' || Array.isArray(doc) || doc.v !== 1)) {
+        throw Object.assign(new Error('Control Center identity is invalid'), { code: 'STATE_READ_FAILED' })
+      }
       cache = doc && typeof doc === 'object' ? doc : null
     }
     return cache
   }
-  const persist = (doc) => { cache = doc; io.write(doc) }
+  const persist = (doc) => {
+    try { io.write(doc) } catch {
+      throw Object.assign(new Error('Control Center identity could not be saved'), { code: 'STATE_WRITE_FAILED' })
+    }
+    cache = doc
+  }
   return {
     identity () {
       const d = load()
       if (!d || !d.privateKey || !d.deviceId) return null
       let privateKey
-      try { privateKey = unprotect(d.privateKey) } catch { return null }
-      if (typeof privateKey !== 'string' || !privateKey) return null
+      try { privateKey = unprotect(d.privateKey) } catch {
+        throw Object.assign(new Error('Control Center signing key could not be unlocked'), { code: 'STATE_READ_FAILED' })
+      }
+      if (typeof privateKey !== 'string' || !privateKey) {
+        throw Object.assign(new Error('Control Center signing key is unavailable'), { code: 'STATE_READ_FAILED' })
+      }
       return { deviceId: d.deviceId, keyId: d.keyId, publicKey: d.publicKey, privateKey, serverPublicKey: d.serverPublicKey, url: d.url }
     },
     isProtected () {
@@ -38,7 +52,7 @@ function createControlStore ({ io, protect = (s) => s, unprotect = (s) => s } = 
       const d = load()
       persist({ ...(d || { v: 1 }), killed: !!flag })
     },
-    clear () { cache = null; io.write(null) }
+    clear () { persist(null) }
   }
 }
 

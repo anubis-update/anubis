@@ -86,6 +86,8 @@ function createCdpBrowser ({
   maxSessions = DEFAULT_MAX_SESSIONS,
   frameQuality = DEFAULT_FRAME_QUALITY,
   defaultUserAgent = null,
+  onOpened = async () => {},
+  onClosed = () => {},
   log = console
 } = {}) {
   if (typeof launcher !== 'function') {
@@ -96,6 +98,13 @@ function createCdpBrowser ({
   }
   const sessions = new Map()
   const warn = (...args) => { if (log && typeof log.warn === 'function') log.warn(...args) }
+
+  function withControl (entry, action) {
+    const run = () => { if (!entry.closed) return action() }
+    const next = (entry.controlTask || Promise.resolve()).then(run, run)
+    entry.controlTask = next
+    return next
+  }
 
   // Every CDP call is guarded so a closed target or a fake missing a method
   // never throws out of the engine.
@@ -161,7 +170,7 @@ function createCdpBrowser ({
     })
     on('Target.targetInfoChanged', (payload) => {
       const info = payload && payload.targetInfo
-      if (info && typeof info.title === 'string') onEvent(entry.id, { t: 'title', title: info.title })
+      if (info && info.targetId === client.targetId && typeof info.title === 'string') onEvent(entry.id, { t: 'title', title: info.title })
     })
   }
 
@@ -190,6 +199,7 @@ function createCdpBrowser ({
         id,
         handle,
         client,
+        engine: browser,
         width: w,
         height: h,
         dpr: Number(dpr) > 0 ? Number(dpr) : 1,
@@ -198,23 +208,30 @@ function createCdpBrowser ({
       }
       sessions.set(id, entry)
       wireEvents(entry)
-      await send(entry, 'Page.enable')
-      await send(entry, 'Network.enable')
-      // Per-session UA override wins over defaultUserAgent and MUST be applied
-      // before navigate so the very first request carries it.
-      const effectiveUserAgent = isValidUserAgent(userAgent)
-        ? userAgent
-        : (isValidUserAgent(defaultUserAgent) ? defaultUserAgent : null)
-      if (effectiveUserAgent) {
-        await send(entry, 'Network.setUserAgentOverride', { userAgent: effectiveUserAgent })
-      }
-      if (Number(dpr) > 0) {
-        await send(entry, 'Emulation.setDeviceMetricsOverride', {
-          width: w, height: h, deviceScaleFactor: entry.dpr, mobile: false
+      await withControl(entry, async () => {
+        await send(entry, 'Page.enable')
+        await send(entry, 'Network.enable')
+        // Per-session UA override must precede the first navigation.
+        const effectiveUserAgent = isValidUserAgent(userAgent)
+          ? userAgent
+          : (isValidUserAgent(defaultUserAgent) ? defaultUserAgent : null)
+        if (effectiveUserAgent) {
+          await send(entry, 'Network.setUserAgentOverride', { userAgent: effectiveUserAgent })
+        }
+        if (Number(dpr) > 0) {
+          await send(entry, 'Emulation.setDeviceMetricsOverride', {
+            width: w, height: h, deviceScaleFactor: entry.dpr, mobile: false
+          })
+        }
+        await send(entry, 'Page.navigate', { url })
+        await startScreencast(entry)
+      })
+      await onOpened({ id, engine: browser, handle, targetId: client.targetId })
+      if (typeof handle.onExit === 'function') {
+        entry.offExit = handle.onExit(() => {
+          if (sessions.get(id) === entry) close({ id })
         })
       }
-      await send(entry, 'Page.navigate', { url })
-      await startScreencast(entry)
       return { id }
     } catch (error) {
       // A failed or aborted open must never leave the just-launched browser
@@ -223,6 +240,7 @@ function createCdpBrowser ({
       if (entry) {
         sessions.delete(id)
         destroy(entry)
+        onClosed({ id, engine: browser, handle })
       } else {
         try { if (handle && typeof handle.close === 'function') handle.close() } catch {}
         try { if (handle && typeof handle.kill === 'function') handle.kill() } catch {}
@@ -274,17 +292,19 @@ function createCdpBrowser ({
   async function resize ({ id, width, height, dpr } = {}) {
     const entry = sessions.get(id)
     if (!entry || entry.closed) return
-    entry.width = clampDimension(width, entry.width)
-    entry.height = clampDimension(height, entry.height)
-    if (Number(dpr) > 0) entry.dpr = Number(dpr)
-    await send(entry, 'Emulation.setDeviceMetricsOverride', {
-      width: entry.width,
-      height: entry.height,
-      deviceScaleFactor: entry.dpr,
-      mobile: false
+    return withControl(entry, async () => {
+      entry.width = clampDimension(width, entry.width)
+      entry.height = clampDimension(height, entry.height)
+      if (Number(dpr) > 0) entry.dpr = Number(dpr)
+      await send(entry, 'Emulation.setDeviceMetricsOverride', {
+        width: entry.width,
+        height: entry.height,
+        deviceScaleFactor: entry.dpr,
+        mobile: false
+      })
+      await send(entry, 'Page.stopScreencast')
+      await startScreencast(entry)
     })
-    await send(entry, 'Page.stopScreencast')
-    await startScreencast(entry)
   }
 
   async function nav ({ id, action, url } = {}) {
@@ -312,6 +332,7 @@ function createCdpBrowser ({
   function destroy (entry) {
     Promise.resolve(send(entry, 'Page.stopScreencast')).catch(() => {})
     entry.closed = true
+    if (typeof entry.offExit === 'function') entry.offExit()
     const handle = entry.handle
     if (entry.client && typeof entry.client.close === 'function') {
       try { entry.client.close() } catch {}
@@ -328,6 +349,40 @@ function createCdpBrowser ({
     if (!entry) return
     sessions.delete(id)
     destroy(entry)
+    onClosed({ id, engine: entry.engine, handle: entry.handle })
+  }
+
+  async function activateTarget (browserClient, targetId) {
+    for (const entry of sessions.values()) {
+      if (entry.closed || entry.handle.client !== browserClient) continue
+      await withControl(entry, async () => {
+        if (entry.client.targetId === targetId) return
+        const client = await cdpClient(entry.handle, { targetId })
+        if (entry.closed) { client.close(); return }
+        await send(entry, 'Page.stopScreencast')
+        entry.client.close()
+        entry.client = client
+        wireEvents(entry)
+        await client.send('Page.enable')
+        await client.send('Network.enable')
+        await client.send('Emulation.setDeviceMetricsOverride', {
+          width: entry.width, height: entry.height, deviceScaleFactor: entry.dpr, mobile: false
+        })
+        const info = await entry.handle.client.send('Target.getTargetInfo', { targetId })
+        entry.url = info.targetInfo.url
+        onEvent(entry.id, { t: 'nav', url: entry.url })
+        onEvent(entry.id, { t: 'title', title: info.targetInfo.title || '' })
+        await client.send('Page.startScreencast', {
+          format: 'jpeg', quality: frameQuality, maxWidth: entry.width, maxHeight: entry.height
+        })
+      })
+    }
+  }
+
+  function closeBrowser (browserClient) {
+    for (const entry of [...sessions.values()]) {
+      if (entry.handle.client === browserClient) close({ id: entry.id })
+    }
   }
 
   function disposeAll () {
@@ -384,6 +439,8 @@ function createCdpBrowser ({
     exportCookies,
     importCookies,
     disposeAll,
+    activateTarget,
+    closeBrowser,
     count: () => sessions.size,
     // CDP has no offscreen window pool (each session owns a real browser target);
     // exposed as a constant 0 purely for literal interface parity with rbi-browser.

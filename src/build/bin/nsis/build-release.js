@@ -158,6 +158,7 @@ function verifyRuntimeInventory (runtime, rows) {
     }
   }
   for (const relative of [
+    'lib/native-browser-file-dialog.ps1',
     'node_modules/node-pty/build/Release/conpty.node',
     'node_modules/node-pty/build/Release/conpty_console_list.node',
     'node_modules/@serialport/bindings-cpp/build/Release/bindings.node'
@@ -209,6 +210,7 @@ async function main () {
   assert.equal(config.win.requestedExecutionLevel, 'asInvoker')
   config.win.target = ['nsis']
   config.win.signExecutable = false
+  if (process.env.ANUBIS_SKIP_NATIVE_REBUILD === '1') config.npmRebuild = false
   config.publish = null
   config.win.publish = null
   const tool = await require(path.join(privateRoot, 'out/toolsets/7zip')).getPath7za()

@@ -38,3 +38,18 @@ test('unknown membership does not invent a home network or workgroup', async () 
   assert.equal(joined.membership.domain, 'example.test')
   assert.equal(joined.membership.workgroup, 'Not applicable')
 })
+
+test('System Info renders reported antivirus, process privilege and bounded installed-software scope', async () => {
+  const { hardwareDetails } = await import('../../client/common/hardware-inventory-view.mjs')
+  const value = hardwareDetails({
+    client: {
+      status: 'ok', collectedAt: 1793620800000, role: 'system',
+      security: { status: 'ok', products: ['Microsoft Defender Antivirus'] },
+      software: { status: 'ok', scope: 'machine+current-user', truncated: true, items: [{ name: 'Anubis', version: '5.7.44' }] }
+    }
+  })
+  assert.equal(value.client.runtimeRole, 'system')
+  assert.deepEqual(value.client.antivirus, ['Microsoft Defender Antivirus'])
+  assert.deepEqual(value.client.installedSoftware, ['Anubis 5.7.44'])
+  assert.equal(value.client.softwareTruncated, true)
+})

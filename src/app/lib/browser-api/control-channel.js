@@ -124,6 +124,13 @@ function createControlChannel ({
       return sendRes(id, r)
     }
     const role = f.role === 'operator' ? 'operator' : 'agent'
+    if (f.command.startsWith('aegis.') && role !== 'operator') {
+      audit(req, 'deny', 'operator-required', 'FORBIDDEN')
+      sendFrame({ t: 'ack', v: 1, id, status: 'accepted' })
+      const response = errResponse(id, 'FORBIDDEN', 'Aegis requires an operator')
+      recent.set(id, response)
+      return sendRes(id, response)
+    }
     if (takeover.on && role !== 'operator') {
       audit(req, 'deny', 'takeover', 'TAKEOVER')
       return sendFrame({ t: 'ack', v: 1, id, status: 'rejected', error: 'TAKEOVER' })
@@ -147,7 +154,7 @@ function createControlChannel ({
         ...(f.leaseId ? { leaseId: f.leaseId } : {}),
         ...(f.taskId ? { taskId: f.taskId } : {}),
         timeoutMs
-      }, REMOTE_ACTOR)
+      }, f.command.startsWith('aegis.') ? { ...REMOTE_ACTOR, role } : REMOTE_ACTOR)
     } catch (e) {
       response = errResponse(id, 'INTERNAL', 'Internal error')
     }
@@ -349,6 +356,26 @@ function createControlChannel ({
     return { enrolled: true, deviceId: res.deviceId, keyId: res.keyId, serverKeyFingerprint: U.fingerprint(res.serverPublicKey) }
   }
 
+  function installIdentity (identity) {
+    if (!identity || typeof identity.deviceId !== 'string' || typeof identity.keyId !== 'string' ||
+        typeof identity.publicKey !== 'string' || typeof identity.privateKey !== 'string' ||
+        typeof identity.serverPublicKey !== 'string') {
+      throw U.ccError('INVALID_REQUEST', 'Installed identity is incomplete')
+    }
+    const target = U.parseCcUrl(identity.url, { allowInsecureLocal })
+    store.saveIdentity({
+      deviceId: identity.deviceId.slice(0, 80),
+      keyId: identity.keyId.slice(0, 80),
+      publicKey: identity.publicKey,
+      privateKey: identity.privateKey,
+      serverPublicKey: identity.serverPublicKey,
+      url: target.href
+    })
+    state.url = target.href
+    state.killed = false
+    return status()
+  }
+
   function connect () {
     if (!enabled) throw U.ccError('DISABLED', 'Control Center channel is disabled')
     if (isKilled()) throw U.ccError('KILLED', 'Control Center channel is switched off')
@@ -373,9 +400,9 @@ function createControlChannel ({
 
   function kill () {
     state.killed = true
-    store.setKilled(true)
     disconnect()
     state.status = 'killed'
+    store.setKilled(true)
     return status()
   }
 
@@ -416,7 +443,7 @@ function createControlChannel ({
     }
   }
 
-  return { enroll, connect, disconnect, kill, resume, forget, status, dispose: disconnect, REMOTE_ACTOR }
+  return { enroll, installIdentity, connect, disconnect, kill, resume, forget, status, dispose: disconnect, REMOTE_ACTOR }
 }
 
 function defaultPost (urlStr, body) {
@@ -439,4 +466,100 @@ function defaultPost (urlStr, body) {
   })
 }
 
-module.exports = { createControlChannel, defaultPost, REMOTE_ACTOR, REMOTE_BLOCKED }
+function createControlManager ({ createChannel, io, initial = {}, locked = {}, forceDisabled = false } = {}) {
+  const normalize = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        typeof value.enabled !== 'boolean' || typeof value.autoConnect !== 'boolean' || typeof value.url !== 'string') {
+      throw U.ccError('INVALID_REQUEST', 'Control Center settings require enabled, autoConnect and URL')
+    }
+    let url = value.url.trim()
+    if (url) {
+      const target = U.parseCcUrl(url)
+      if (target.pathname !== '/ws/v1/device' || target.search || target.hash) throw U.ccError('INVALID_URL', 'Use the /ws/v1/device endpoint without query or fragment')
+      url = target.href
+    }
+    if (value.enabled && !url) throw U.ccError('INVALID_URL', 'A WSS device endpoint is required')
+    return { enabled: value.enabled, url, autoConnect: value.autoConnect }
+  }
+  const saved = io.read()
+  let settings = normalize({
+    enabled: false,
+    url: '',
+    autoConnect: false,
+    ...initial,
+    ...(saved || {}),
+    ...locked,
+    ...(forceDisabled ? { enabled: false } : {})
+  })
+  let channel = createChannel(settings)
+  let enrolling = false
+  const needChannel = () => {
+    if (enrolling) throw U.ccError('BUSY', 'Device enrollment is in progress')
+    if (!settings.enabled) throw U.ccError('DISABLED', 'Enable the Control Center channel first')
+    return channel
+  }
+  function autoConnect () {
+    if (settings.enabled && settings.autoConnect) {
+      const status = channel.status()
+      if (status.enrolled && !status.killed) channel.connect()
+    }
+  }
+  function status () {
+    return {
+      ...(channel ? channel.status() : { enabled: false, state: 'disabled', enrolled: false }),
+      settings: { ...settings },
+      locked: Object.keys(locked),
+      forceDisabled
+    }
+  }
+  autoConnect()
+  return {
+    status,
+    configure (value) {
+      if (enrolling) throw U.ccError('BUSY', 'Device enrollment is in progress')
+      const next = normalize(value)
+      if (forceDisabled && next.enabled) throw U.ccError('POLICY_DENIED', 'Control Center is disabled by the administrator kill switch')
+      for (const [key, val] of Object.entries(locked)) {
+        if (next[key] !== val) throw U.ccError('POLICY_DENIED', 'Control Center setting is locked: ' + key)
+      }
+      if (channel && channel.status().enrolled && next.url !== channel.status().url) {
+        throw U.ccError('IDENTITY_CONFLICT', 'Forget the existing enrollment before changing the server URL')
+      }
+      if (JSON.stringify(next) === JSON.stringify(settings)) return status()
+      const replacement = createChannel(next)
+      try { io.write(next) } catch {
+        if (replacement) replacement.dispose()
+        throw U.ccError('STATE_WRITE_FAILED', 'Control Center settings could not be saved')
+      }
+      if (channel) channel.dispose()
+      channel = replacement
+      settings = next
+      autoConnect()
+      return status()
+    },
+    installIdentity (identity) {
+      const target = U.parseCcUrl(identity.url)
+      channel.installIdentity({ ...identity, url: target.href })
+      const next = { enabled: true, url: target.href, autoConnect: true }
+      if (JSON.stringify(normalize(next)) === JSON.stringify(settings)) {
+        channel.connect()
+        return status()
+      }
+      return this.configure(next)
+    },
+    async enroll (value) {
+      const current = needChannel()
+      if (current.status().enrolled) throw U.ccError('IDENTITY_CONFLICT', 'Forget the existing enrollment before enrolling again')
+      enrolling = true
+      try { return await current.enroll(value) } finally { enrolling = false }
+    },
+    connect: () => { needChannel().connect(); return status() },
+    disconnect: () => { needChannel().disconnect(); return status() },
+    kill: () => { needChannel().kill(); return status() },
+    resume: () => { needChannel().resume(); return status() },
+    forget: () => { needChannel().forget(); return status() },
+    dispose: () => { if (channel) channel.dispose() }
+  }
+}
+
+module.exports = { createControlChannel, createControlManager, defaultPost, REMOTE_ACTOR, REMOTE_BLOCKED }

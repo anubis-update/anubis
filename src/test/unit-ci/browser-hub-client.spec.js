@@ -39,6 +39,13 @@ test('real transport: runGlobalAsync("browserHub", action, payload) and unwrap',
   await assert.rejects(hub.status(), { code: 'DISABLED', message: 'off' })
 })
 
+test('local CVE scanner uses its dedicated IPC global', async () => {
+  const { calls } = installPre((action, payload) => ({ runId: action + ':' + payload.runId }))
+  const result = await hub.localCveScanner('get', { runId: 'run-1' })
+  assert.deepEqual(result, { runId: 'get:run-1' })
+  assert.deepEqual(calls, [{ name: 'cveScanner', action: 'get', payload: { runId: 'run-1' } }])
+})
+
 test('managed Web session: unsupported browserHub maps to REMOTE_UNSUPPORTED', async () => {
   installPre(() => { throw new Error('Unsupported managed browser function: browserHub') })
   await assert.rejects(hub.status(), { code: 'REMOTE_UNSUPPORTED' })
@@ -86,6 +93,54 @@ test('onEvent subscribes to browserHub:event and unsubscribes', () => {
   assert.equal(listeners['browserHub:event'].length, 0)
 })
 
+test('managed Web events poll authenticated RPC without native IPC pushes and stop after unmount', async () => {
+  const got = []
+  let reply
+  const { calls, listeners } = installPre(() => new Promise(resolve => { reply = resolve }))
+  window.et = { isWebApp: true }
+  const off = hub.onEvent(ev => got.push(ev))
+  assert.equal(calls[0].action, 'events.since')
+  assert.equal(listeners['browserHub:event'], undefined)
+  off()
+  reply({ ok: true, result: { events: [{ seq: 1, event: 'browser.launched' }] } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(got, [])
+  assert.equal(calls.length, 1)
+})
+
+test('tab refresh coalesces event bursts and cancels pending reloads on unmount', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { listeners } = installPre(() => ({ ok: true, result: {} }))
+  let reloads = 0
+  const off = hub.onTabChange('b1', () => { reloads++ })
+  const send = ev => listeners['browserHub:event'][0]({}, ev)
+  for (let i = 0; i < 200; i++) send({ browserId: 'b1', event: 'tab.navigated', seq: i })
+  send({ browserId: 'b2', event: 'tab.created' })
+  send({ browserId: 'b1', event: 'browser.closed' })
+  t.mock.timers.tick(100)
+  assert.equal(reloads, 1)
+  send({ browserId: 'b1', event: 'tab.closed' })
+  off()
+  t.mock.timers.tick(100)
+  assert.equal(reloads, 1)
+})
+
+test('managed Web polling delivers confirmations and surfaces transport failures', async () => {
+  const got = []
+  const errors = []
+  installPre(() => ({ ok: true, result: { events: [{ seq: 5, event: 'confirmation.requested' }] } }))
+  window.et = { isWebApp: true }
+  let off = hub.onEvent(ev => got.push(ev))
+  await new Promise(resolve => setImmediate(resolve))
+  off()
+  assert.equal(got[0].event, 'confirmation.requested')
+  window.pre.runGlobalAsync = async () => { throw new Error('device disconnected') }
+  off = hub.onEvent(ev => got.push(ev), error => errors.push(error.message))
+  await new Promise(resolve => setImmediate(resolve))
+  off()
+  assert.deepEqual(errors, ['device disconnected'])
+})
+
 test('mock: profiles, tabs, extensions via real shapes', async () => {
   const b = { browserId: 'br_1' }
   assert.equal((await hub.exec('profile.list')).profiles.length, 2)
@@ -126,6 +181,7 @@ test('contract: every action/command used by the Browser Hub exists in the real 
   const actions = createBrowserHubController({ api: {}, tokens: {} }).actions()
   const used = ['status', 'policy.get', 'policy.set', 'policy.reset', 'tokens.list', 'tokens.issue', 'tokens.revoke',
     'confirmations.list', 'confirmations.decide', 'approver.register', 'approver.unregister', 'staging.import', 'command.execute']
+  used.push('controlCenter.status', 'controlCenter.configure', 'controlCenter.enroll', 'controlCenter.connect', 'controlCenter.disconnect', 'controlCenter.kill', 'controlCenter.resume', 'controlCenter.forget')
   used.forEach(a => assert.ok(actions.includes(a), 'missing action ' + a))
   const names = registry.commands.map(c => c.name)
   const cmds = ['browser.launch', 'browser.close', 'profile.list', 'profile.select', 'tab.list', 'tab.new', 'tab.activate', 'tab.close',

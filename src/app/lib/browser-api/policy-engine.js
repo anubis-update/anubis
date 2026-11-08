@@ -6,12 +6,14 @@
  */
 
 const DEFAULT_AGENT_RULES = [
+  { command: 'aegis.*', effect: 'deny' },
   { command: 'page.evaluate', effect: 'deny' },
   { command: 'passwords.*', effect: 'deny' },
   { command: 'extension.install', effect: 'deny' },
   { command: 'extension.remove', effect: 'deny' },
   { command: 'devMode.set', effect: 'deny' },
   { command: 'cookies.*', effect: 'deny' },
+  { command: 'site.domains', effect: 'confirm' },
   { command: 'history.clear', effect: 'deny' },
   { command: 'storage.*', effect: 'deny' },
   { command: 'history.list', effect: 'confirm' },

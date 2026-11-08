@@ -121,7 +121,7 @@ function launchFixture (overrides = {}) {
       spawns.push(child)
       return child
     },
-    fsExists: () => true,
+    fsExists: p => !p.startsWith('C:\\managed'),
     detectPath: () => 'C:\\chrome.exe',
     copyProfile: async (src, dst) => { copies.push({ src, dst }) },
     resolveUserDataDir: () => 'C:\\managed\\cdp-chrome',
@@ -165,6 +165,67 @@ test('launcher falls back to an ephemeral port when the pipe connect fails', asy
   assert.ok(f.spawns[0].args.includes('--remote-debugging-pipe'))
   assert.ok(f.spawns[1].args.includes('--remote-debugging-port=0'))
   assert.equal(handle.mode, 'port')
+})
+
+test('shared launcher never overwrites an existing managed profile on restart', async () => {
+  const f = launchFixture({ fsExists: p => p === 'C:\\managed\\cdp-chrome\\Default\\Preferences' })
+  const handle = await f.launch.launcher()
+  assert.equal(f.copies.length, 0)
+  handle.close()
+})
+
+test('selecting an unseeded profile copies only that directory in an existing managed root', async () => {
+  const f = launchFixture({
+    fsExists: p => !p.endsWith('Preferences'),
+    resolveLaunchOptions: () => ({ profileDirectory: 'Profile 2' })
+  })
+  const handle = await f.launch.launcher()
+  assert.deepEqual(f.copies, [{
+    src: 'C:\\LA\\Google\\Chrome\\User Data\\Profile 2',
+    dst: 'C:\\managed\\cdp-chrome\\Profile 2'
+  }])
+  handle.close()
+})
+
+for (const preferPipe of [true, false]) {
+  test(`shared launcher applies selected profile and extension permission (pipe=${preferPipe})`, async () => {
+    let options = { profileId: 'p_work', profileDirectory: 'Profile 1', unsafeExtensionDebugging: true }
+    let reads = 0
+    const f = launchFixture({
+      preferPipe,
+      resolveLaunchOptions: engine => {
+        assert.equal(engine, 'chrome')
+        reads++
+        return options
+      }
+    })
+    const first = await f.launch.launcher({ id: 'one' })
+    assert.ok(f.spawns[0].args.includes('--profile-directory=Profile 1'))
+    assert.ok(f.spawns[0].args.includes('--enable-unsafe-extension-debugging'))
+    assert.equal(first.profileId, 'p_work')
+    assert.equal(first.profileDirectory, 'Profile 1')
+    options = { profileDirectory: 'Default', unsafeExtensionDebugging: false }
+    const reused = await f.launch.launcher({ id: 'two' })
+    assert.equal(reads, 1, 'Settings must not change a running shared process')
+    assert.equal(reused.profileDirectory, 'Profile 1')
+    first.close()
+    reused.close()
+    const next = await f.launch.launcher({ id: 'three' })
+    assert.equal(reads, 2)
+    assert.equal(next.profileDirectory, 'Default')
+    assert.ok(!f.spawns[1].args.includes('--enable-unsafe-extension-debugging'))
+    next.close()
+  })
+}
+
+test('shared launcher leaves unsafe extension debugging off by default and rejects invalid profiles', async () => {
+  const f = launchFixture()
+  const handle = await f.launch.launcher({ id: 'one' })
+  assert.ok(!f.spawns[0].args.includes('--enable-unsafe-extension-debugging'))
+  handle.close()
+  const invalid = launchFixture({ resolveLaunchOptions: () => ({ profileDirectory: '..\\other' }) })
+  await assert.rejects(invalid.launch.launcher({ id: 'invalid' }), { code: 'PROFILE_NOT_FOUND' })
+  assert.equal(invalid.spawns.length, 0)
 })
 
 test('launcher refuses when the browser is already running, with a specific code', async () => {

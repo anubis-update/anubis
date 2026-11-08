@@ -41,8 +41,8 @@ const groups = [
       { key: 'pluginStore', name: 'Plugin Store', icon: Package, pro: true },
       { key: 'aiAgents', name: 'Anubis Oracle', sub: 'AI Agents', icon: Bot },
       { key: 'automation', name: 'Anubis Osiris', sub: 'Automation', icon: Workflow, pro: true },
-      { key: 'dllScanner', name: 'Anubis Scarab', sub: 'DLL Scanner', icon: FileSearch, pro: true },
-      { key: 'cveScanner', name: 'Anubis Aegis', sub: 'CVE Scanner', icon: ShieldAlert, pro: true },
+      { key: 'dllScanner', name: 'Anubis Scarab', sub: 'DLL Scanner', icon: FileSearch },
+      { key: 'cveScanner', name: 'Anubis Aegis', sub: 'CVE Scanner', icon: ShieldAlert },
       { key: 'browser', name: 'Browser', icon: Globe }
     ]
   },
@@ -57,7 +57,7 @@ const groups = [
   }
 ]
 
-export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children }) {
+export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children, cveScannerOpen, onOpenCveScanner, dllScannerOpen, onOpenDllScanner, onOpenWorkspace }) {
   const [upsell, setUpsell] = useState(null)
   const [activateOpen, setActivateOpen] = useState(false)
   const { store } = window
@@ -73,28 +73,39 @@ export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children
   })
   const settingVisible = store.showModal === modals.setting
   const activeItems = {
-    bookmarks: store.openedSideBar === 'bookmarks',
+    bookmarks: !cveScannerOpen && !dllScannerOpen && store.openedSideBar === 'bookmarks',
     settingSync: settingVisible && store.settingTab === settingMap.setting && store.settingItem.id === 'setting-sync',
     aiAgents: store.rightPanelVisible && store.rightPanelTab === 'ai',
     widgets: settingVisible && store.settingTab === settingMap.widgets,
     setting: settingVisible && store.settingTab === settingMap.setting && store.settingItem.id === 'setting-common',
+    cveScanner: cveScannerOpen,
+    dllScanner: dllScannerOpen,
     about: store.showInfoModal
   }
   const actions = {
     systemInfo: () => store.openAbout(infoTabs.os),
     bookmarks: handleClickBookmark,
     settingSync: () => store.openSettingSync(),
-    aiAgents: () => store.toggleAIPanel(),
+    aiAgents: () => {
+      onOpenWorkspace()
+      if ((cveScannerOpen || dllScannerOpen) && store.rightPanelVisible && store.rightPanelTab === 'ai') return
+      store.toggleAIPanel()
+    },
     widgets: () => store.openWidgetsModal(),
     setting: () => store.openSetting(),
+    cveScanner: onOpenCveScanner,
+    dllScanner: onOpenDllScanner,
     about: () => store.openAbout(),
     faq: () => window.pre.openExternal(brand.domains.docs),
     hide: () => store.toggleLeftSideBar(),
-    browser: () => store.addTab({
-      type: terminalWebType,
-      url: 'https://www.google.com',
-      title: 'Browser'
-    })
+    browser: () => {
+      onOpenWorkspace()
+      store.addTab({
+        type: terminalWebType,
+        url: 'https://www.google.com',
+        title: 'Browser'
+      })
+    }
   }
 
   // Browser is a PRO feature gated on the per-device managed entitlement.
@@ -154,7 +165,7 @@ export default auto(function GroupedSidebarMenu ({ handleClickBookmark, children
                   aria-label={sub ? `${name} — ${sub}` : name}
                   aria-current={active ? 'page' : undefined}
                   disabled={key === 'aiAgents' && isAIDisabled()}
-                  onClick={key === 'quickConnect' ? undefined : () => selectItem({ key, name, pro })}
+                  onClick={key === 'quickConnect' ? onOpenWorkspace : () => selectItem({ key, name, pro })}
                 >
                   <Icon size={18} strokeWidth={1.75} aria-hidden='true' />
                   <span className='preview-label preview-item-text'>

@@ -36,6 +36,9 @@ function createProfileCatalog ({
   } catch {}
 
   function enumerate (engine) {
+    for (const [id, profile] of dirs) {
+      if (profile.engine === engine) dirs.delete(id)
+    }
     const root = resolveSourceDir ? resolveSourceDir(engine) : null
     if (!root) return { profiles: [], available: false }
     let state
@@ -74,10 +77,10 @@ function createProfileCatalog ({
   function select (engine, profileId) {
     const e = dirs.get(profileId)
     if (!e || e.engine !== engine) return false
-    selected.set(engine, profileId)
     if (persist) {
-      try { persist.write(Object.fromEntries(selected)) } catch {}
+      persist.write({ ...Object.fromEntries(selected), [engine]: profileId })
     }
+    selected.set(engine, profileId)
     return true
   }
 

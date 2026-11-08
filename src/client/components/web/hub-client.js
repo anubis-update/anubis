@@ -34,6 +34,7 @@ const MOCK_SEED = () => ({
   tokens: [],
   policy: null,
   staged: {},
+  cveRun: null,
   approver: false,
   seq: 1
 })
@@ -186,6 +187,23 @@ const mockActions = {
   'events.subscribe': () => ({ subscribed: true, channel: EVENT_CHANNEL }),
   'events.unsubscribe': () => ({ subscribed: false }),
   'events.since': () => ({ events: [] }),
+  'cveScanner.start': () => {
+    state.cveRun = {
+      runId: 'mock-cve-run',
+      state: 'done',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      scanners: {
+        js: { state: 'done', progress: 'Scan complete', findingsCount: 0, coverage: { status: 'complete', warnings: [] }, error: null },
+        python: { state: 'done', progress: 'Scan complete', findingsCount: 0, coverage: null, error: null }
+      },
+      findings: [],
+      error: null
+    }
+    return state.cveRun
+  },
+  'cveScanner.get': () => state.cveRun,
+  'cveScanner.cancel': () => state.cveRun,
   'staging.import': ({ path }) => {
     if (!path) throw hubError('INVALID_REQUEST', 'path required')
     const stagedId = nextId('stg')
@@ -225,7 +243,7 @@ async function ipc (action, payload) {
     try {
       res = await pre.runGlobalAsync('browserHub', action, payload)
     } catch (e) {
-      // The managed Web session allow-list never exposes browserHub (local-only control surface).
+      // Older device installations do not expose the Hub through managed RPC.
       if (/Unsupported managed browser function/i.test(String(e && e.message))) {
         throw hubError('REMOTE_UNSUPPORTED', 'This device runs a version without Browser Hub support. Update Anubis on the device.')
       }
@@ -247,6 +265,14 @@ async function ipc (action, payload) {
   return res.result
 }
 
+async function localCveScanner (action, payload) {
+  const pre = getPre()
+  if (pre && !forceMock) return pre.runGlobalAsync('cveScanner', action, payload)
+  const mockAction = mockActions['cveScanner.' + action]
+  if (!mockAction) throw hubError('INVALID_REQUEST', 'Unknown local CVE scanner action')
+  return mockAction(payload)
+}
+
 // Runs a registry command as the UI admin actor; unwraps the dispatcher envelope.
 async function exec (command, params = {}, { browserId, tabId, leaseId } = {}) {
   const env = await ipc('command.execute', {
@@ -265,9 +291,34 @@ async function exec (command, params = {}, { browserId, tabId, leaseId } = {}) {
 
 // Subscribes to 'browserHub:event' pushes (after approver.register or events.subscribe).
 // Returns an unsubscribe function.
-function onEvent (cb) {
+function onEvent (cb, onError = (error) => console.error('Browser Hub events:', error)) {
   const pre = getPre()
-  if (!pre || forceMock || typeof pre.ipcOnEvent !== 'function') return () => {}
+  if (!pre || forceMock) return () => {}
+  if (typeof window !== 'undefined' && window.et && window.et.isWebApp) {
+    let stopped = false
+    let seq = 0
+    let timer
+    let reported = false
+    const poll = async () => {
+      try {
+        const result = await ipc('events.since', { seq })
+        if (stopped) return
+        for (const event of result.events) {
+          if (event.seq <= seq) continue
+          seq = event.seq
+          cb(event)
+        }
+        reported = false
+      } catch (error) {
+        if (!stopped && !reported) { onError(error); reported = true }
+      } finally {
+        if (!stopped) timer = setTimeout(poll, 750)
+      }
+    }
+    poll()
+    return () => { stopped = true; clearTimeout(timer) }
+  }
+  if (typeof pre.ipcOnEvent !== 'function') return () => {}
   // preload passes the raw ipcRenderer listener args: (ipcEvent, payload)
   const handler = (...args) => cb(args.length > 1 ? args[1] : args[0])
   pre.ipcOnEvent(EVENT_CHANNEL, handler)
@@ -276,9 +327,21 @@ function onEvent (cb) {
   }
 }
 
+function onTabChange (browserId, reload, onError) {
+  let timer
+  const off = onEvent(ev => {
+    if (ev.browserId !== browserId || !ev.event.startsWith('tab.')) return
+    clearTimeout(timer)
+    timer = setTimeout(reload, 100)
+  }, onError)
+  return () => { off(); clearTimeout(timer) }
+}
+
 module.exports = {
+  onTabChange,
   EVENT_CHANNEL,
   ipc,
+  localCveScanner,
   exec,
   onEvent,
   isMock,

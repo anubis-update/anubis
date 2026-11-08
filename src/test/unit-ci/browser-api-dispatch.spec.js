@@ -81,6 +81,14 @@ test('policy: agent dangerous/sensitive commands denied; domain-blocked launch U
   assert.ok(['POLICY_DENIED', 'INVALID_REQUEST'].includes((await run(api, 'tab.goto', { url: 'file:///c:/secret' }, agent, { tabId: tabs[0].tabId })).error.code))
 })
 
+test('a control-center task on an unattended machine launches without a local approver', async () => {
+  const { api } = build({ unattendedRemote: true })
+  const remote = { id: 'remote', role: 'agent', kind: 'remote', transport: 'control-center' }
+  const launched = await run(api, 'browser.launch', { engine: 'chrome' }, remote)
+  assert.equal(launched.ok, true, JSON.stringify(launched))
+  assert.equal(api.confirmations.list().length, 0)
+})
+
 test('agent browser.launch needs confirmation; with no local approver -> CONFIRMATION_REQUIRED and not cached', async () => {
   const { api } = build()
   const id = rid()

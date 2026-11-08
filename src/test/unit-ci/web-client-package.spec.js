@@ -26,6 +26,9 @@ test('published renderer resolves shared browser modules without the app checkou
     options.cwd = target
     const [packed] = JSON.parse(npm(['pack', '--json', '--ignore-scripts']))
     const files = new Set(packed.files.map(file => file.path))
+    for (const file of ['client/components/sidebar/cve-scanner-page.jsx', 'client/components/sidebar/cve-scanner-page.styl']) {
+      assert(files.has(file), `Packed CVE scanner UI file is missing: ${file}`)
+    }
     const consumer = path.join(temporary, 'consumer')
     fs.mkdirSync(consumer)
     fs.writeFileSync(path.join(consumer, 'package.json'), '{"private":true}\n')

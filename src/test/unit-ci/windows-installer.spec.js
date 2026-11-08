@@ -151,7 +151,7 @@ describe('Windows installer contract', () => {
     assert.match(include, /StrCpy \$AnubisServiceStopped 0\s+\$\{GetParameters\}/)
     // The recovery action is best-effort: it never validates package state and
     // always exits 0, so it can never re-enter the abort path.
-    assert.match(script, /\[ValidateSet\('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start'\)\]/)
+    assert.match(script, /\[ValidateSet\('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start', 'ReleasePackage'\)\]/)
     assert.match(script, /if \(\$Action -eq 'Start'\) \{[\s\S]*?Invoke-Host @\('arm', '--name', \$ServiceName\)[\s\S]*?Start-Service -Name \$ServiceName -ErrorAction SilentlyContinue[\s\S]*?exit 0/)
   })
 
@@ -193,5 +193,33 @@ describe('Windows installer contract', () => {
     ], { encoding: 'utf8', timeout: 25000, windowsHide: true })
     assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`)
     assert.equal(result.stdout.trim(), 'S-1-5-21-1-2-3-500,S-1-5-21-9-9-9-1001')
+  })
+
+  it('repairs a stale service before querying a helper in an absent package', {
+    skip: process.platform !== 'win32',
+    timeout: 30000
+  }, () => {
+    const script = path.resolve(__dirname, '../../build/windows-machine-install.ps1')
+    const probe = `
+. '${script.replace(/'/g, "''")}' -DefinitionsOnly
+$Action = 'Prepare'
+$InstallDir = Join-Path $env:TEMP ('anubis-absent-' + [Guid]::NewGuid().ToString('N'))
+function Read-AllowedUserSids { return 'S-1-5-21-1-2-3-500' }
+function Assert-Destination {}
+function Invoke-UserMigration {}
+function Get-OwnedService { throw 'Queried helper before repairing absent package' }
+function Repair-StaleCanonicalService { throw 'STALE_REPAIR_REACHED' }
+try { Invoke-MachineInstall; throw 'Missing repair' }
+catch {
+  if ($_.Exception.Message -cne 'STALE_REPAIR_REACHED') { throw }
+  Write-Output 'STALE_REPAIR_REACHED'
+}
+`
+    const result = spawnSync(path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-EncodedCommand', Buffer.from(probe, 'utf16le').toString('base64')
+    ], { encoding: 'utf8', timeout: 25000, windowsHide: true })
+    assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`)
+    assert.equal(result.stdout.trim(), 'STALE_REPAIR_REACHED')
   })
 })

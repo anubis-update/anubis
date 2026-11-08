@@ -43,6 +43,7 @@ function startDesktopManaged ({
     return { stop }
   }
   try {
+    const auto = globalState.get('browserAutoEnroll') || {}
     agent = createManagedRuntime({
       createAgent: createAgent || require('@ai-security-tool/managed-access').createAgent,
       userData: app.getPath('userData'),
@@ -50,7 +51,9 @@ function startDesktopManaged ({
       header,
       version: app.getVersion(),
       onStatus,
-      env
+      env,
+      browserEnrollment: auto.browserEnrollment,
+      onBrowserEnrolled: auto.onBrowserEnrolled
     })
     globalState.set('managedActivate', key => agent.activate(key))
     agent.start()

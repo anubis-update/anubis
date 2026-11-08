@@ -34,6 +34,25 @@ test('new capabilities are advertised', () => {
   assert.ok(!caps.has('passwords.ui'))
 })
 
+test('engine-independent commands work when only Edge or RBI is configured', async () => {
+  const { createBrowserApi } = require('../../app/lib/browser-api')
+  for (const engines of [['edge'], []]) {
+    const api = createBrowserApi({
+      engines,
+      launchBrowser: async () => { throw new Error('Capabilities must not launch a browser') },
+      resolveSourceDir: () => null,
+      auditFs: { append () {}, read: () => '', list: () => [] }
+    })
+    try {
+      const response = await api.dispatcher.execute({
+        v: 1, requestId: 'capabilities_single_engine', command: 'api.capabilities', params: {}
+      }, { id: 'test', role: 'agent', kind: 'remote' })
+      assert.equal(response.ok, true, JSON.stringify(response.error))
+      assert.equal(response.result.engines[0].engine, engines[0] || 'rbi')
+    } finally { api.shutdown() }
+  }
+})
+
 test('nav guard is wired only with checkUrl and bound through onSession', async () => {
   const a = mk({ checkUrl: () => ({ ok: true }) })
   await a.driver.launch({})
@@ -75,4 +94,50 @@ test('storage and clearHistory use the owning browser', async () => {
   assert.equal(a.driver.storage('t1').tag, 'storage')
   assert.deepEqual(await a.driver.clearHistory(r.browserId, { since: 5 }), { cleared: true, engine: 'chrome', o: { since: 5 } })
   await assert.rejects(async () => a.driver.downloads('nope'), (e) => e.code === 'BROWSER_NOT_FOUND')
+})
+
+test('shared launch settings read persisted profile and current install policy without exposing paths', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'anubis-shared-options-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const { profileIdFor } = require('../../app/lib/cdp-profiles')
+  const { createBrowserApi } = require('../../app/lib/browser-api')
+  const { DEFAULT_POLICY } = require('../../app/lib/browser-api/policy-engine')
+  const profileId = profileIdFor('chrome', 'Profile 2')
+  const api = createBrowserApi({
+    launchBrowser: async () => { throw new Error('Must not launch') },
+    auditDir: root,
+    resolveSourceDir: () => 'source',
+    catalogIo: {
+      exists: () => true,
+      readFile: () => JSON.stringify({ profile: { info_cache: { 'Profile 2': { name: 'Work' } } } }),
+      persist: { read: () => ({ chrome: profileId }), write () {} }
+    }
+  })
+  t.after(() => api.shutdown())
+  assert.deepEqual(api.sharedLaunchOptions('chrome'), {
+    profileId, profileDirectory: 'Profile 2', unsafeExtensionDebugging: false
+  })
+  api.policy.setPolicy({ ...DEFAULT_POLICY, extensions: { allowInstall: true } })
+  assert.equal(api.sharedLaunchOptions('chrome').unsafeExtensionDebugging, true)
+  assert.deepEqual(api.sharedLaunchOptions('edge'), { unsafeExtensionDebugging: true })
+})
+
+test('saved extension restoration runs only with explicit install permission', async () => {
+  for (const allowed of [false, true]) {
+    let restored = 0
+    const store = { read: () => [], write () {} }
+    const a = mk({
+      allowExtensions: () => allowed,
+      extensionStateForHandle: () => store,
+      makeExtensions: options => {
+        assert.equal(options.extensionState, store)
+        return { restore: async () => { restored++ } }
+      }
+    })
+    await a.driver.launch({})
+    assert.equal(restored, allowed ? 1 : 0)
+    a.driver.shutdown()
+  }
 })

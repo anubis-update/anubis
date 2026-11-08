@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start')]
+  [ValidateSet('Prepare', 'Stop', 'Finish', 'Remove', 'UninstallPrevious', 'Start', 'ReleasePackage')]
   [string] $Action,
   [string] $InstallDir,
   [string] $SidListFile,
@@ -389,6 +389,46 @@ function Wait-ServiceState([int] $State) {
   throw "Timed out waiting for service state $State"
 }
 
+function Get-FileLockers([string[]] $Paths) {
+  if (-not ('AnubisInstaller.FileLock' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace AnubisInstaller {
+  public static class FileLock {
+    [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmStartSession(out uint session, int flags, string key);
+    [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint session);
+    [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmRegisterResources(uint session, uint nFiles, string[] files, uint nApps, IntPtr apps, uint nServices, string[] services);
+    [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint session, out uint needed, ref uint count, [Out] RM_PROCESS_INFO[] info, out uint reboot);
+    [StructLayout(LayoutKind.Sequential)] public struct FILETIME { public uint Low; public uint High; }
+    [StructLayout(LayoutKind.Sequential)] public struct RM_UNIQUE_PROCESS { public int Pid; public FILETIME Start; }
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct RM_PROCESS_INFO {
+      public RM_UNIQUE_PROCESS Process;
+      [MarshalAs(UnmanagedType.ByValTStr, SizeConst=256)] public string AppName;
+      [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)] public string Service;
+      public uint AppType; public uint AppStatus; public uint Session; public int Restartable;
+    }
+    public static string[] Names(string[] paths) {
+      uint session; if (RmStartSession(out session, 0, Guid.NewGuid().ToString()) != 0) return new string[0];
+      try {
+        if (RmRegisterResources(session, (uint)paths.Length, paths, 0, IntPtr.Zero, 0, null) != 0) return new string[0];
+        uint needed = 0, count = 0, reboot; int rc = RmGetList(session, out needed, ref count, null, out reboot);
+        if (rc != 234 || needed == 0) return new string[0];
+        var info = new RM_PROCESS_INFO[needed]; count = needed;
+        if (RmGetList(session, out needed, ref count, info, out reboot) != 0) return new string[0];
+        var names = new string[count];
+        for (int i = 0; i < count; i++) names[i] = info[i].AppName + " (pid " + info[i].Process.Pid + ")";
+        return names;
+      } finally { RmEndSession(session); }
+    }
+  }
+}
+'@
+  }
+  return @([AnubisInstaller.FileLock]::Names($Paths))
+}
+
 function Stop-OwnedService {
   $status = Get-OwnedService
   if ($null -eq $status -or $status.scm.State -eq 1) { return }
@@ -586,13 +626,13 @@ function Invoke-MachineInstall {
   switch ($Action) {
     'Prepare' {
       Invoke-UserMigration ($MigrationRequested -eq '1') $false
-      if ($AllowedUserSids -ne '' -and $null -ne (Get-OwnedService) -and -not (Test-RetainedAllowListEmpty)) {
-        throw 'The retained service allow-list cannot be changed by an update'
-      }
       if (Test-Path -LiteralPath $InstallDir) {
         if (-not (Test-Path -LiteralPath $marker) -and
             @(Get-ChildItem -LiteralPath $InstallDir -Force).Count -gt 0) {
           throw 'Existing non-machine installation must not be migrated implicitly'
+        }
+        if ($AllowedUserSids -ne '' -and $null -ne (Get-OwnedService) -and -not (Test-RetainedAllowListEmpty)) {
+          throw 'The retained service allow-list cannot be changed by an update'
         }
         Stop-OwnedService
       } else {
@@ -609,8 +649,17 @@ function Invoke-MachineInstall {
       }
     }
     'Stop' {
-      Stop-OwnedService
-      if ($null -ne (Get-OwnedService)) { Disable-ServiceRecoveryViaScm $ServiceName }
+      $helper = Join-Path $InstallDir 'anubis-host.exe'
+      if (-not (Test-Path -LiteralPath $helper)) {
+        # A half-deleted package has no helper. Stop through SCM if anything is
+        # still running; do not fail the upgrade just because the helper is gone.
+        foreach ($svc in @(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+          if ($svc.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force -ErrorAction Stop }
+        }
+      } else {
+        Stop-OwnedService
+        if ($null -ne (Get-OwnedService)) { Disable-ServiceRecoveryViaScm $ServiceName }
+      }
     }
     'UninstallPrevious' { Uninstall-PreviousMachinePackage }
     'Finish' {
@@ -654,14 +703,33 @@ function Invoke-MachineInstall {
       Invoke-UserMigration ($MigrationRequested -eq '1') $true
     }
     'Remove' {
-      Stop-OwnedService
-      Remove-MigratedUserBindings
-      if ($null -ne (Get-OwnedService)) { Invoke-Host @('uninstall', '--name', $ServiceName) }
+      $helper = Join-Path $InstallDir 'anubis-host.exe'
+      if (-not (Test-Path -LiteralPath $helper)) {
+        foreach ($svc in @(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+          if ($svc.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force -ErrorAction Stop }
+        }
+        if ($null -ne (Get-ServiceRecord)) { Remove-StaleServiceViaScm $ServiceName }
+      } else {
+        Stop-OwnedService
+        Remove-MigratedUserBindings
+        if ($null -ne (Get-OwnedService)) { Invoke-Host @('uninstall', '--name', $ServiceName) }
+      }
       $deadline = [DateTime]::UtcNow.AddSeconds(30)
       while (@(Get-Service -ErrorAction Stop | Where-Object { $_.ServiceName -eq $ServiceName }).Count -ne 0) {
         if ([DateTime]::UtcNow -ge $deadline) { throw 'Service deletion did not complete' }
         Start-Sleep -Milliseconds 500
       }
+    }
+    'ReleasePackage' {
+      $files = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -Force -File -ErrorAction SilentlyContinue)
+      foreach ($file in $files) {
+        try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch { }
+      }
+      $files = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -Force -File -ErrorAction SilentlyContinue)
+      if ($files.Count -eq 0) { break }
+      $lockers = @(Get-FileLockers @($files | ForEach-Object { $_.FullName }))
+      $who = if ($lockers.Count) { $lockers -join ', ' } else { 'a process that is not anubis.exe' }
+      throw "These files are still open in ${who}: $((($files | ForEach-Object { $_.FullName.Substring($InstallDir.Length) }) -join ', ')). Close that program and run setup again."
     }
     default { throw 'An explicit installation action is required' }
   }
@@ -696,7 +764,9 @@ if (-not $DefinitionsOnly) {
     Write-Output "Machine installer action $Action completed."
     exit 0
   } catch {
-    [Console]::Error.WriteLine("Machine installer failed: $($_.Exception.Message). Profiles and host data were retained.")
+    $failure = "Machine installer failed: $($_.Exception.Message). Profiles and host data were retained."
+    [Console]::Error.WriteLine($failure)
+    [Console]::Out.WriteLine($failure)
     exit 5
   }
 }

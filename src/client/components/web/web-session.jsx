@@ -305,6 +305,7 @@ export default function WebSession ({ tab, reloadTab }) {
       */}
       {!embedded && valid && (
         <WebBrowserGate
+          sessionId={tab.id}
           activeUa={activeUa}
           engine={engine}
           contextNote={contextNote}

@@ -368,8 +368,14 @@
       SetOutPath $TEMP
       RMDir /r "$INSTDIR"
       ${If} ${FileExists} "$INSTDIR\*.*"
+        nsExec::ExecToStack '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-machine-install.ps1" -Action ReleasePackage -InstallDir "$INSTDIR"'
+        Pop $R0
+        Pop $R1
+        RMDir /r "$INSTDIR"
+      ${EndIf}
+      ${If} ${FileExists} "$INSTDIR\*.*"
         SetErrorLevel 5
-        Abort "Could not remove the protected package. Host data was retained."
+        Abort "Could not remove the protected package. $R1 Host data was retained. Exit code: 5."
       ${EndIf}
     ${EndIf}
   !macroend

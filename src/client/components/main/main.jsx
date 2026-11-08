@@ -1,5 +1,5 @@
 import { auto } from 'manate/react'
-import { lazy, Suspense, useEffect } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import Layout from '../layout/layout'
 import FileInfoModal from '../sftp/file-info-modal'
 import FileCompareModal from '../sftp/file-compare-modal'
@@ -7,6 +7,8 @@ import UpdateCheck from './upgrade'
 import SettingModal from '../setting-panel/setting-modal'
 import TextEditor from '../text-editor/text-editor-entry'
 import Sidebar from '../sidebar'
+import CveScannerPage from '../sidebar/cve-scanner-page'
+import DllScannerPage from '../sidebar/dll-scanner-page'
 import CssOverwrite from '../bg/css-overwrite'
 import UiTheme from './ui-theme'
 import TitleBarOverlay from './title-bar-overlay'
@@ -61,6 +63,46 @@ const AIConfigModal = lazy(() => import('../ai/ai-config-modal'))
 const Opacity = lazy(() => import('../common/opacity'))
 
 export default auto(function Index (props) {
+  const [dllScannerOpen, setDllScannerOpen] = useState(false)
+  const [cveScannerOpen, setCveScannerOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem('anubis.aegis.open') === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  const setCveScannerPageOpen = open => {
+    try {
+      window.localStorage.setItem('anubis.aegis.open', String(open))
+    } catch (error) {
+      console.error('Could not save Aegis page state:', error.message)
+    }
+    setCveScannerOpen(open)
+  }
+
+  const otherPanelOpen = !!(props.store.showModal || props.store.showInfoModal)
+  const moduleOpen = cveScannerOpen || dllScannerOpen
+  const closeScannerPages = () => {
+    setDllScannerOpen(false)
+    setCveScannerPageOpen(false)
+    setTimeout(props.store.triggerResize, 0)
+  }
+  useEffect(() => {
+    if (otherPanelOpen) {
+      setDllScannerOpen(false)
+      setCveScannerPageOpen(false)
+    }
+  }, [otherPanelOpen])
+
+  const openScannerPage = scanner => {
+    props.store.hideSettingModal()
+    props.store.showInfoModal = false
+    props.store.setOpenedSideBar('')
+    setDllScannerOpen(scanner === 'dll')
+    setCveScannerPageOpen(scanner === 'cve')
+  }
+
   useEffect(() => {
     const { store } = props
     window.addEventListener('resize', store.onResize)
@@ -245,7 +287,12 @@ export default auto(function Index (props) {
     pinned,
     isMobile: store.isMobile,
     leftSideBarIcons: config.leftSideBarIcons,
-    widgetInstancesLength: widgetInstances.length
+    widgetInstancesLength: widgetInstances.length,
+    cveScannerOpen,
+    dllScannerOpen,
+    onOpenWorkspace: closeScannerPages,
+    onOpenCveScanner: () => openScannerPage('cve'),
+    onOpenDllScanner: () => openScannerPage('dll')
   }
 
   const infoModalProps = {
@@ -346,9 +393,15 @@ export default auto(function Index (props) {
           id='outside-context'
         >
           <Sidebar {...sidebarProps} />
-          <Layout
-            store={store}
-          />
+          <div className='terminal-workspace' hidden={moduleOpen}>
+            <Layout store={store} />
+          </div>
+          {moduleOpen && (
+            <div className='module-workspace-slot' style={{ left: store.leftSideBarWidth }}>
+              {cveScannerOpen && <CveScannerPage onClose={closeScannerPages} />}
+              {dllScannerOpen && <DllScannerPage onClose={closeScannerPages} />}
+            </div>
+          )}
         </div>
         <ConfirmModalStore
           transferToConfirm={transferToConfirm}
@@ -372,7 +425,7 @@ export default auto(function Index (props) {
             </Suspense>
           </LazyBoundary>
         )}
-        <RightSidePanel {...rightPanelProps}>
+        <RightSidePanel {...rightPanelProps} rightPanelVisible={!moduleOpen && rightPanelProps.rightPanelVisible}>
           {!isAIDisabled() && <AIChat {...aiChatProps} />}
           <TerminalInfo key={store.activeTabId} store={store} {...deepCopy(store.terminalInfoProps)} />
           {/* the cmd history panel has two homes; the footer popover is the

@@ -61,6 +61,7 @@ function createDispatcher ({
   confirmations,
   deviceId = 'device',
   transport = 'local-rest',
+  unattendedRemote = false,
   now = () => Date.now(),
   setTimer = setTimeout,
   clearTimer = clearTimeout
@@ -201,12 +202,16 @@ function createDispatcher ({
       }
 
       if (verdict.effect === 'confirm') {
-        try {
-          await confirmations.request({ command: def.name, summary: `${def.name}${origin ? ' on ' + origin : ''}`, actor: actor.id })
-          confirmation = { result: 'approved', channel: 'local-ui' }
-        } catch (e) {
-          confirmation = { result: e && e.code === 'CONFIRMATION_TIMEOUT' ? 'timeout' : 'rejected', channel: 'local-ui' }
-          throw e
+        if (unattendedRemote && actor.transport === 'control-center' && actor.kind === 'remote') {
+          confirmation = { result: 'approved', channel: 'control-center' }
+        } else {
+          try {
+            await confirmations.request({ command: def.name, summary: `${def.name}${origin ? ' on ' + origin : ''}`, actor: actor.id })
+            confirmation = { result: 'approved', channel: 'local-ui' }
+          } catch (e) {
+            confirmation = { result: e && e.code === 'CONFIRMATION_TIMEOUT' ? 'timeout' : 'rejected', channel: 'local-ui' }
+            throw e
+          }
         }
       }
 

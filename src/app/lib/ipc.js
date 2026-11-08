@@ -263,6 +263,10 @@ function initCdpBrowser (child) {
     fsExists: (p) => nodeFs.existsSync(p),
     copyProfile: (src, dst) => copyProfileTolerant(src, dst),
     resolveUserDataDir: (browser) => nodePath.join(app.getPath('userData'), 'cdp-profiles', browser),
+    resolveLaunchOptions: (browser) => {
+      const api = globalState.get('browserApi')
+      return api ? api.sharedLaunchOptions(browser) : {}
+    },
     connectPipe: async (proc) => createPipeTransport(proc),
     connectPort: async (endpoint) => {
       const WebSocket = require('ws')
@@ -287,6 +291,18 @@ function initCdpBrowser (child) {
       if (child.connected) child.send({ type: 'rbi-frame', id, data: data.toString('base64') })
     },
     onEvent: (id, event) => { if (child.connected) child.send({ type: 'rbi-event', id, event }) },
+    onOpened: async ({ id, engine, handle, targetId }) => {
+      const api = globalState.get('browserApi')
+      if (!api) return
+      await api.hub.engine(engine).attach({
+        ...handle,
+        close: () => cdp.closeBrowser(handle.client)
+      }, { sessionId: id, targetId })
+    },
+    onClosed: ({ id, engine }) => {
+      const api = globalState.get('browserApi')
+      if (api) api.hub.engine(engine).detachSession(id)
+    },
     log
   })
   globalState.set('cdpBrowser', cdp)
@@ -316,6 +332,15 @@ function initBrowserApi (config = {}, child) {
     copyFile: (src, dst) => nodeFs.copyFileSync(src, dst),
     removeDir: (p) => nodeFs.rmSync(p, { recursive: true, force: true }),
     resolveUserDataDir: (browser) => nodePath.join(userData, 'cdp-profiles', browser),
+    resolveSourceProfile: (browser) => {
+      const engine = browser === 'edge' ? 'edge' : 'chrome'
+      const direct = engine === 'edge'
+        ? nodePath.join(localAppData, 'Microsoft', 'Edge', 'User Data')
+        : nodePath.join(localAppData, 'Google', 'Chrome', 'User Data')
+      if (nodeFs.existsSync(direct)) return direct
+      if (!process.env.ANUBIS_MACHINE_CONTEXT_SERVICE) return direct
+      return require('./machine-browser-profile').interactiveBrowserData(engine) || direct
+    },
     resolveHubUserDataDir: (browser, { profileMode, profileId } = {}) => nodePath.join(hubRoot, 'profiles', browser, profileMode || 'dedicated', profileId || 'default'),
     connectPipe: async (proc) => createPipeTransport(proc),
     connectPort: async (endpoint) => {
@@ -342,16 +367,29 @@ function initBrowserApi (config = {}, child) {
     nodeFs.writeFileSync(target, JSON.stringify(obj), { mode: 0o600 })
   }
   const { createStaging } = require('./browser-api/staging')
-  const { createDevModePolicyReader } = require('./cdp-extensions')
+  const { createDevModePolicyReader, createExtensionStateStore } = require('./cdp-extensions')
   const { createBrowserHubController } = require('./browser-api/hub-controller')
   const staging = createStaging({ root: nodePath.join(hubRoot, 'staging') })
   const api = createBrowserApi({
+    aegis: (action, payload) => globalState.get('cveScanner').handle(action, payload),
     launchBrowser,
-    resolveSourceDir: (engine) => engine === 'edge'
-      ? nodePath.join(localAppData, 'Microsoft', 'Edge', 'User Data')
-      : nodePath.join(localAppData, 'Google', 'Chrome', 'User Data'),
+    unattendedRemote: !!process.env.ANUBIS_MACHINE_CONTEXT_SERVICE,
+    onActiveTarget: (client, targetId) => globalState.get('cdpBrowser').activateTarget(client, targetId),
+    resolveSourceDir: (engine) => {
+      const direct = engine === 'edge'
+        ? nodePath.join(localAppData, 'Microsoft', 'Edge', 'User Data')
+        : nodePath.join(localAppData, 'Google', 'Chrome', 'User Data')
+      if (nodeFs.existsSync(direct)) return direct
+      if (!process.env.ANUBIS_MACHINE_CONTEXT_SERVICE) return direct
+      return require('./machine-browser-profile').interactiveBrowserData(engine) || direct
+    },
     auditDir: nodePath.join(hubRoot, 'audit'),
     staging,
+    extensionStateForHandle: handle => createExtensionStateStore({
+      root: nodePath.join(hubRoot, 'extensions'),
+      userDataDir: handle.userDataDir,
+      profileDirectory: handle.profileDirectory
+    }),
     policyIo: { read: () => readJson('policy.json'), write: (d) => writeJson('policy.json', d) },
     catalogIo: { persist: { read: () => readJson('profiles-selected.json'), write: (d) => writeJson('profiles-selected.json', d) } },
     readDevModePolicy: createDevModePolicyReader({ execFileSync: require('node:child_process').execFileSync }),
@@ -359,34 +397,70 @@ function initBrowserApi (config = {}, child) {
   })
   globalState.set('browserApi', api)
   const tokens = createTokenStore()
-  let controlCenter = null
-  const ccEnabled = (config.controlCenterEnabled === true || process.env.ANUBIS_CC === '1') && process.env.ANUBIS_CC_KILL !== '1'
-  if (ccEnabled) {
-    const { createControlChannel, defaultPost } = require('./browser-api/control-channel')
-    const { createControlStore } = require('./browser-api/control-channel-store')
-    const ccStore = createControlStore({
-      io: { read: () => readJson('control-center.json'), write: (d) => writeJson('control-center.json', d) },
-      protect: safeEncrypt,
-      unprotect: safeDecrypt
-    })
-    controlCenter = createControlChannel({
-      api,
-      store: ccStore,
-      WebSocket: require('ws'),
-      post: defaultPost,
-      enabled: true,
-      url: config.controlCenterUrl || process.env.ANUBIS_CC_URL,
-      deviceInfo: () => ({ deviceId: require('os').hostname(), anubisVersion: app.getVersion() }),
-      log: (...a) => log.info(...a)
-    })
-    if (config.controlCenterAutoConnect === true && ccStore.identity() && !ccStore.killed()) {
-      try { controlCenter.connect() } catch (e) { log.error('control center connect failed', e && e.code) }
+  const { createControlManager, createControlChannel, defaultPost } = require('./browser-api/control-channel')
+  const ccSettingsMap = { enabled: 'controlCenterEnabled', url: 'controlCenterUrl', autoConnect: 'controlCenterAutoConnect' }
+  const ccLocked = {}
+  for (const [key, field] of Object.entries(ccSettingsMap)) {
+    if ((config.adminLockedKeys || []).includes(field)) ccLocked[key] = config[field]
+  }
+  const readCcJson = file => {
+    try { return JSON.parse(nodeFs.readFileSync(nodePath.join(hubRoot, file), 'utf8')) } catch (error) {
+      if (error.code === 'ENOENT') return null
+      throw error
     }
   }
+  const controlCenter = createControlManager({
+    initial: {
+      enabled: config.controlCenterEnabled === true || process.env.ANUBIS_CC === '1',
+      url: config.controlCenterUrl || process.env.ANUBIS_CC_URL || '',
+      autoConnect: config.controlCenterAutoConnect === true
+    },
+    locked: ccLocked,
+    forceDisabled: process.env.ANUBIS_CC_KILL === '1',
+    io: {
+      read: () => readCcJson('control-center-settings.json'),
+      write: settings => writeJson('control-center-settings.json', settings)
+    },
+    createChannel: settings => {
+      const { createControlStore } = require('./browser-api/control-channel-store')
+      const ccStore = createControlStore({
+        io: { read: () => readCcJson('control-center.json'), write: (d) => writeJson('control-center.json', d) },
+        protect: safeEncrypt,
+        unprotect: safeDecrypt
+      })
+      return createControlChannel({
+        api,
+        store: ccStore,
+        WebSocket: require('ws'),
+        post: defaultPost,
+        enabled: settings.enabled,
+        url: settings.url,
+        deviceInfo: () => ({ deviceId: require('os').hostname(), anubisVersion: app.getVersion() }),
+        log: (...a) => log.info(...a)
+      })
+    }
+  })
+  globalState.set('controlCenter', controlCenter)
+  const { createModuleBroker } = require('./module-broker')
+  let brokerService
+  let brokerConfigError
+  const brokerServiceFile = nodePath.join(userData, 'module-broker-service.json')
+  try {
+    brokerService = JSON.parse(nodeFs.readFileSync(brokerServiceFile, 'utf8'))
+    if (!brokerService || typeof brokerService !== 'object' || Array.isArray(brokerService)) throw new Error('Invalid Broker service configuration')
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      brokerConfigError = 'Module Broker service configuration cannot be read'
+      log.error(brokerConfigError)
+    }
+  }
+  const moduleBroker = createModuleBroker({ service: brokerService, configurationError: brokerConfigError, log: message => log.warn(message) })
   const hubController = createBrowserHubController({
     api,
     tokens,
     controlCenter,
+    moduleBroker,
+    nativePasswordTransfer: require('./browser-api/password-native-transfer').createNativePasswordTransfer({ root: nodePath.join(hubRoot, 'password-transfers') }),
     send: (channel, ev) => {
       const win = globalState.get('win')
       if (win && !win.isDestroyed()) win.webContents.send(channel, ev)
@@ -403,10 +477,20 @@ function initBrowserApi (config = {}, child) {
       nodeFs.writeFileSync(nodePath.join(hubRoot, 'browser-api.json'), JSON.stringify({ host, port, token: agentToken }), { mode: 0o600 })
     }).catch((e) => log.error('browser api listen failed', e && e.message))
   }
-  if (child) child.once('disconnect', () => { hubController.dispose(); if (server) server.stop(); api.shutdown() })
+  const stopBroker = () => moduleBroker.dispose().catch(error => log.error('Module Broker shutdown failed', error.message))
+  app.once('before-quit', stopBroker)
+  if (child) child.once('disconnect', () => { stopBroker(); hubController.dispose(); if (server) server.stop(); api.shutdown() })
 }
 
 function initIpc () {
+  const { createAegisService } = require('./aegis-service')
+  const cveScannerData = require('node:path').join(app.getPath('userData'), 'cve-scanner')
+  const cveScanner = createAegisService({
+    dataDir: cveScannerData,
+    onError: message => log.error(message)
+  })
+  globalState.set('cveScanner', cveScanner)
+  app.once('before-quit', () => cveScanner.dispose())
   const headless = !!globalState.get('headlessRuntime')
   powerMonitor.on('resume', () => {
     globalState.get('win').webContents.send('power-resume', null)
@@ -464,7 +548,12 @@ function initIpc () {
     }
   })
   const asyncGlobals = {
-    getHardwareInventory: () => require('@ai-security-tool/managed-access/hardware-inventory').getHardwareInventory(),
+    getHardwareInventory: () => require('./client-inventory').getManagedInventory(),
+    cveScanner: (action, payload) => {
+      const scanner = globalState.get('cveScanner')
+      if (!scanner) throw new Error('Local CVE scanner is unavailable')
+      return scanner.handle(action, payload)
+    },
     browserHub: (action, payload) => {
       const hub = globalState.get('browserHub')
       return hub

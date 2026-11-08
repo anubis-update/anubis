@@ -23,7 +23,7 @@ function trimSnapshot (snap, maxBytes) {
   return { ...snap, nodes, tree, truncated }
 }
 
-function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}), staging, vault }) {
+function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}), staging, vault, aegis }) {
   const target = (t) => {
     if (t && t.ref) return { ref: t.ref, snapshotId: t.snapshotId }
     if (t && Number.isFinite(t.x) && Number.isFinite(t.y)) return { x: t.x, y: t.y }
@@ -46,6 +46,17 @@ function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}), staging
   }
 
   return {
+    ...Object.fromEntries(['settings', 'configure', 'start', 'latest', 'get', 'cancel'].map(action => [
+      'aegis.' + action,
+      ({ params, actor }) => {
+        if (!['admin', 'operator'].includes(actor.role)) throw apiError('FORBIDDEN', 'Aegis requires an administrator or operator')
+        if (!aegis) throw apiError('CAPABILITY_MISSING', 'Aegis is unavailable in this device build')
+        try { return aegis(action, params) } catch (error) {
+          if (error.code?.startsWith('E_')) throw apiError('INVALID_REQUEST', error.message)
+          throw error
+        }
+      }
+    ])),
     'api.capabilities' () {
       const limits = policy.limits()
       const info = deviceInfo()
@@ -106,6 +117,11 @@ function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}), staging
     'tab.forward': nav('forward'),
     'tab.goto': nav('goto'),
 
+    async 'page.title' ({ driver, tabId }) {
+      const { value } = await driver.page(tabId).evaluate(tabId, { expression: '({title:document.title,url:location.href})' })
+      if (!value || typeof value.title !== 'string' || typeof value.url !== 'string') throw apiError('INTERNAL', 'Page metadata is unavailable')
+      return { title: value.title.slice(0, 10000), url: value.url, untrusted: true }
+    },
     async 'page.snapshot' ({ driver, tabId, params }) {
       const limits = policy.limits()
       const maxBytes = Math.min(params.maxBytes || limits.maxSnapshotBytes, limits.maxSnapshotBytes)
@@ -160,6 +176,27 @@ function createHandlers ({ hub, policy, leases, deviceInfo = () => ({}), staging
     },
     async 'page.evaluate' ({ driver, tabId, params }) {
       return driver.page(tabId).evaluate(tabId, { expression: params.expression })
+    },
+
+    async 'site.domains' ({ driver, browserId }) {
+      const browser = driver.listBrowsers().find(item => item.browserId === browserId)
+      if (!browser) throw apiError('BROWSER_NOT_FOUND', 'The selected browser is no longer running')
+      const cookies = await driver.cookies(browserId, {})
+      const domains = new Set()
+      let excludedCount = 0
+      for (const cookie of cookies) {
+        const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase()
+        if ((cookie.expires > 0 && cookie.expires * 1000 <= Date.now()) ||
+            domain.length > 253 || !domain.includes('.') || require('node:net').isIP(domain) ||
+            !domain.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) ||
+            !policy.checkUrl('https://' + domain + '/').ok) {
+          excludedCount++
+          continue
+        }
+        domains.add(domain)
+      }
+      if (domains.size > 1000) throw apiError('LIMIT_EXCEEDED', 'Cookie domain inventory exceeds 1000 sites; no partial inventory returned')
+      return { browserId, engine: driver.engine, profileId: browser.profileId || 'default', profileMode: browser.profileMode, domains: [...domains].sort(), excludedCount }
     },
 
     async 'cookies.export' ({ driver, browserId, params }) {

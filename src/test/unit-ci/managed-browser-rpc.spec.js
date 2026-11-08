@@ -69,6 +69,42 @@ test('browser RPC denies native process controls, prototype pivots and authentic
   }
 })
 
+test('managed browser RPC exposes only validated local CVE scanner operations', async () => {
+  const calls = []
+  const { rpc } = fixture({
+    functions: {
+      cveScanner: (action, payload) => {
+        calls.push([action, payload])
+        return { runId: '0123456789abcdef0123456789abcdef', state: 'running' }
+      }
+    }
+  })
+  const start = {
+    jsModulePath: 'C:\\ProgramData\\Modules\\cve-scanner-js',
+    pythonModulePath: 'C:\\ProgramData\\Modules\\cve-scanner-py',
+    revision: 0
+  }
+  const runId = '0123456789abcdef0123456789abcdef'
+  assert.equal((await rpc('cveScanner', ['configure', start])).state, 'running')
+  assert.equal((await rpc('cveScanner', ['settings', {}])).state, 'running')
+  assert.equal((await rpc('cveScanner', ['start', { confirmed: true }])).state, 'running')
+  assert.equal((await rpc('cveScanner', ['get', { runId }])).state, 'running')
+  assert.equal((await rpc('cveScanner', ['cancel', { runId }])).state, 'running')
+  assert.equal((await rpc('cveScanner', ['latest', {}])).state, 'running')
+  assert.deepEqual(calls, [['configure', start], ['settings', {}], ['start', { confirmed: true }], ['get', { runId }], ['cancel', { runId }], ['latest', {}]])
+  for (const args of [
+    ['exec', start],
+    ['start', { ...start, command: 'cmd.exe' }],
+    ['start', { jsModulePath: 'C:\\Modules\\cve-scanner-js', pythonModulePath: 'C:\\Modules\\cve-scanner-py' }, 'extra'],
+    ['get', { runId: 'not-a-run-id' }],
+    ['cancel', { runId, extra: true }],
+    ['latest', { runId }]
+  ]) {
+    await assert.rejects(rpc('cveScanner', args), /Invalid local CVE scanner request|Confirm public vulnerability/)
+  }
+  assert.equal(calls.length, 6)
+})
+
 test('only verified profile passwords invoke and await an explicitly enabled headless unlock', async () => {
   let calls = 0
   let release

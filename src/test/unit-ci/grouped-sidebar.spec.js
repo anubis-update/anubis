@@ -190,16 +190,14 @@ test('ordinary entries call real handlers; Quick connect uses the actual input p
   assert.equal(button(h.render(), 'Anubis Oracle — AI Agents').props.disabled, true)
 })
 
-test('only the PRO entries open the upgrade modal with the mapped feature name', async () => {
+test('PRO entries open the upgrade modal while Scarab and Aegis open their pages', async () => {
   const { store, calls } = makeStore()
   const h = await harness(sidebar + 'menu-preview.jsx', store)
   const pro = [
     ['Plugin Store', 'Plugin Store'],
-    ['Anubis Osiris — Automation', 'Anubis Osiris'],
-    ['Anubis Scarab — DLL Scanner', 'Anubis Scarab'],
-    ['Anubis Aegis — CVE Scanner', 'Anubis Aegis']
+    ['Anubis Osiris — Automation', 'Anubis Osiris']
   ]
-  assert.equal(pro.length, 4)
+  assert.equal(pro.length, 2)
   for (const [label, feature] of pro) {
     button(h.render(), label).props.onClick()
     const modal = nodes(h.render(), type('UpgradeModal'))[0]
@@ -208,6 +206,19 @@ test('only the PRO entries open the upgrade modal with the mapped feature name',
     modal.props.onClose()
     assert.equal(nodes(h.render(), type('UpgradeModal'))[0].props.open, false)
   }
+  let opened = false
+  const props = { cveScannerOpen: false, onOpenCveScanner: () => { opened = true } }
+  button(h.render(props), 'Anubis Aegis — CVE Scanner').props.onClick()
+  assert.equal(opened, true)
+  assert.equal(nodes(h.render({ ...props, cveScannerOpen: true }), type('CveScannerModal')).length, 0)
+  let dllOpened = false
+  const dllProps = { dllScannerOpen: true, onOpenDllScanner: () => { dllOpened = true } }
+  const dllButton = button(h.render(dllProps), 'Anubis Scarab — DLL Scanner')
+  dllButton.props.onClick()
+  assert.equal(dllOpened, true)
+  assert.equal(dllButton.props['aria-current'], 'page')
+  assert.equal(dllButton.props.className.includes(' pro'), false)
+  assert.equal(nodes(h.render(), type('UpgradeModal'))[0].props.open, false)
   assert.equal(calls.length, 0)
 })
 

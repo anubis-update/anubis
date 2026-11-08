@@ -22,7 +22,7 @@ test('managed runtime pins a loopback endpoint and never forwards native credent
     header,
     version: '5.6.11',
     onStatus () {},
-    env: { ANUBIS_ADMIN_MCP_TOKEN: 'never-forward-this' }
+    env: { ANUBIS_ADMIN_MCP_TOKEN: 'never-forward-this', ANUBIS_ADMIN_MANAGED_URL: 'https://api.anubis.locker' }
   }
   assert.equal(createManagedRuntime(input), agent)
   assert.equal(options.baseUrl, 'https://api.anubis.locker')
@@ -53,7 +53,7 @@ test('managed lifecycle starts once, stops on backend exit and awaits shutdown b
     port: 45678,
     header: createTransportSecret(),
     globalState: state,
-    env: {},
+    env: { ANUBIS_ADMIN_MANAGED_URL: 'https://api.anubis.locker' },
     log: { info () {}, warn () {}, error () {} },
     createAgent: ({ onStatus }) => ({
       start () {

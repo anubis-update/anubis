@@ -12,7 +12,8 @@
   "asar": true,
   "afterPack": "./src/build/bin/after-pack.js",
   "asarUnpack": [
-    "node_modules/node-pty/build/Release/**"
+    "node_modules/node-pty/build/Release/**",
+    "lib/native-browser-file-dialog.ps1"
   ],
   "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
   "win": {

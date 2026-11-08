@@ -25,5 +25,6 @@ test('stale or tampered persisted selection is dropped', () => {
   assert.equal(evil.selected('chrome'), null)
   const broken = mk({ read: () => { throw new Error('x') }, write () { throw new Error('y') } })
   assert.equal(broken.selected('chrome'), null)
-  assert.equal(broken.select('chrome', broken.enumerate('chrome').profiles[0].profileId), true)
+  assert.throws(() => broken.select('chrome', broken.enumerate('chrome').profiles[0].profileId), /y/)
+  assert.equal(broken.selected('chrome'), null)
 })

@@ -41,6 +41,7 @@ function downloadJson (obj, fileName) {
 // self-contained local vault; all cookie/profile round-trips go through the
 // callbacks supplied by WebSession (which owns the RBI socket).
 export default function BrowserPanel ({
+  sessionId,
   activeUa,
   engine = 'rbi',
   entitled = true,
@@ -278,7 +279,7 @@ export default function BrowserPanel ({
         size='small'
         items={[
           { key: 'tools', label: 'Browser tools', children: sections },
-          { key: 'hub', label: 'Browser Hub', children: <BrowserHubPanel /> }
+          { key: 'hub', label: 'Browser Hub', children: <BrowserHubPanel sessionId={sessionId} engine={engine} /> }
         ]}
       />
       <Modal

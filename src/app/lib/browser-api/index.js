@@ -23,6 +23,7 @@ const { createProfileCatalog } = require('../cdp-profiles')
 const { createHistoryReader } = require('../cdp-history')
 
 function createBrowserApi ({
+  aegis,
   launchBrowser,
   resolveSourceDir,
   auditDir,
@@ -36,7 +37,10 @@ function createBrowserApi ({
   staging,
   vault,
   readDevModePolicy,
+  extensionStateForHandle,
   historyReader,
+  onActiveTarget,
+  unattendedRemote = false,
   now = () => Date.now(),
   transport = 'local-rest'
 } = {}) {
@@ -63,13 +67,16 @@ function createBrowserApi ({
     allowExtensions: () => policy.extensions().allowInstall === true,
     resolveSource: (source) => (staging && source.stagedId ? staging.resolveDir(source.stagedId) : null),
     readDevModePolicy,
+    extensionStateForHandle,
+    onActiveTarget,
     emit: bus.emit
   }))
   drivers.push(createRbiDriver())
-  const hub = createDriverHub({ drivers })
+  const hub = createDriverHub({ drivers, defaultEngine: engines[0] || 'rbi' })
 
   const registry = createCommandRegistry({ registry: registryJson, documents: { 'common.schema.json': commonSchema } })
   const handlers = createHandlers({
+    aegis,
     hub,
     policy,
     leases,
@@ -88,12 +95,23 @@ function createBrowserApi ({
     idempotency,
     leases,
     confirmations,
+    unattendedRemote,
     deviceId: info.deviceId || 'device',
     transport,
     now
   })
 
-  return { registry, dispatcher, hub, policy, policyStore, staging, audit, events: bus, confirmations, leases, redactor, catalog, shutdown: () => hub.shutdown() }
+  function sharedLaunchOptions (engine) {
+    catalog.enumerate(engine)
+    const profileId = catalog.selected(engine)
+    const profile = profileId && catalog.resolve(profileId)
+    return {
+      ...(profile ? { profileId, profileDirectory: profile.dir } : {}),
+      unsafeExtensionDebugging: policy.extensions().allowInstall === true
+    }
+  }
+
+  return { registry, dispatcher, hub, policy, policyStore, staging, audit, events: bus, confirmations, leases, redactor, catalog, sharedLaunchOptions, shutdown: () => hub.shutdown() }
 }
 
 module.exports = { createBrowserApi }

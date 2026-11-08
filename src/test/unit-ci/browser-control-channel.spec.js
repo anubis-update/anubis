@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { WebSocketServer, WebSocket } = require('ws')
 const { createBrowserApi } = require('../../app/lib/browser-api')
-const { createControlChannel, defaultPost, REMOTE_ACTOR } = require('../../app/lib/browser-api/control-channel')
+const { createControlChannel, createControlManager, defaultPost, REMOTE_ACTOR } = require('../../app/lib/browser-api/control-channel')
 const { createControlStore } = require('../../app/lib/browser-api/control-channel-store')
 const U = require('../../app/lib/browser-api/control-channel-util')
 const { createBrowserHubController } = require('../../app/lib/browser-api/hub-controller')
@@ -23,13 +23,14 @@ async function until (fn, ms = 4000) {
   return false
 }
 
-function makeApi () {
+function makeApi (aegis) {
   const client = createFakeCdp({
     'Target.getTargets': { targetInfos: [{ type: 'page', targetId: 'T1', url: 'https://a.test/' }] },
     'Target.attachToTarget': (p) => ({ sessionId: 'S_' + p.targetId })
   })
   const files = new Map()
   const api = createBrowserApi({
+    aegis,
     launchBrowser: async () => ({ client, userDataDir: 'u', close () {} }),
     resolveSourceDir: () => null,
     auditFs: { append: (n, l) => files.set(n, (files.get(n) || '') + l), read: (n) => files.get(n) || '', list: () => [...files.keys()] },
@@ -46,11 +47,11 @@ function memStore (protect) {
   return { store: createControlStore({ io, protect: protect && protect.p, unprotect: protect && protect.u }), raw: () => doc }
 }
 
-async function setup ({ opts = {}, ccOpts = {} } = {}) {
+async function setup ({ opts = {}, ccOpts = {}, aegis } = {}) {
   const { createControlCenter } = require(stubPath)
   const cc = createControlCenter({ WebSocketServer, ...ccOpts })
   await cc.start()
-  const { api, auditRecords } = makeApi()
+  const { api, auditRecords } = makeApi(aegis)
   const ms = memStore({ p: (s) => 'enc:' + s, u: (s) => s.replace(/^enc:/, '') })
   const delays = []
   const timers = {
@@ -93,6 +94,27 @@ test('url policy: wss only, ws only for localhost when allowed', () => {
   assert.equal(U.enrollUrl(new URL('wss://cc.example/ws/v1/device?x=1')).href, 'https://cc.example/enroll')
 })
 
+test('signed Aegis commands require the operator role and use the device service', { skip: !hasStub }, async () => {
+  const calls = []
+  const context = await setup({
+    aegis: (action, params) => { calls.push({ action, params }); return { revision: 3 } }
+  })
+  try {
+    const { deviceId } = await context.enrolled()
+    const denied = await context.cc.sendCommand(deviceId, { command: 'aegis.settings', params: {} })
+    assert.equal(denied.ok, false)
+    assert.equal(denied.error.code, 'FORBIDDEN')
+    assert.equal(calls.length, 0)
+    const allowed = await context.cc.sendCommand(deviceId, { command: 'aegis.settings', params: {}, role: 'operator' })
+    assert.equal(allowed.ok, true, JSON.stringify(allowed))
+    assert.equal(allowed.result.revision, 3)
+    assert.deepEqual(calls, [{ action: 'settings', params: {} }])
+    const invalid = await context.cc.sendCommand(deviceId, { command: 'aegis.start', params: { confirmed: false }, role: 'operator' })
+    assert.equal(invalid.error.code, 'INVALID_REQUEST')
+    assert.equal(calls.length, 1)
+  } finally { await context.stop() }
+})
+
 test('util: canonical, sign/verify, scrub', () => {
   assert.equal(U.canonical({ b: 1, a: [2, { d: 1, c: undefined }] }), '{"a":[2,{"d":1}],"b":1}')
   const kp = U.generateKeyPair()
@@ -116,6 +138,98 @@ test('store: private key is protected at rest and absent from status/public data
   assert.equal(store.identity().deviceId, 'd')
   store.clear()
   assert.equal(store.identity(), null)
+})
+
+test('store write/decryption failures preserve the previous identity and remain explicit', () => {
+  let doc = null
+  let broken = false
+  const store = createControlStore({
+    io: { read: () => doc, write: next => { if (broken) throw new Error('disk error'); doc = next } }
+  })
+
+  test('emergency stop disconnects even if persisting its flag fails', () => {
+    const { EventEmitter } = require('node:events')
+    let closed = false
+    const { api } = makeApi()
+    class Socket extends EventEmitter {
+      send () {}
+      close () { closed = true }
+    }
+    const channel = createControlChannel({
+      api,
+      enabled: true,
+      WebSocket: Socket,
+      store: {
+        identity: () => ({ deviceId: 'test', url: 'wss://cc.example/ws/v1/device' }),
+        killed: () => false,
+        isProtected: () => true,
+        setKilled: () => { throw Object.assign(new Error('Cannot save kill flag'), { code: 'STATE_WRITE_FAILED' }) }
+      }
+    })
+    try {
+      channel.connect()
+      assert.throws(() => channel.kill(), { code: 'STATE_WRITE_FAILED' })
+      assert.equal(closed, true)
+      assert.equal(channel.status().state, 'killed')
+    } finally { channel.dispose(); api.shutdown() }
+  })
+  store.saveIdentity({ deviceId: 'original', keyId: 'k', publicKey: 'pub', privateKey: 'PRIVATE', serverPublicKey: 's', url: 'wss://x/' })
+  broken = true
+  assert.throws(() => store.clear(), { code: 'STATE_WRITE_FAILED' })
+  assert.equal(store.identity().deviceId, 'original')
+  assert.throws(() => store.setKilled(true), { code: 'STATE_WRITE_FAILED' })
+  assert.equal(store.killed(), false)
+  const locked = createControlStore({ io: { read: () => doc, write () {} }, unprotect: () => { throw new Error('cannot unlock') } })
+  assert.throws(() => locked.identity(), { code: 'STATE_READ_FAILED' })
+  const unreadable = createControlStore({ io: { read: () => { throw new Error('cannot read') }, write () {} } })
+  assert.throws(() => unreadable.identity(), { code: 'STATE_READ_FAILED' })
+})
+
+test('Control Center settings persist live, reject insecure URLs and respect locks and identity pins', async () => {
+  let saved = null
+  let broken = false
+  let identity = false
+  let killed = false
+  let connects = 0
+  let disposed = 0
+  let enrolledUrl
+  const options = {
+    io: { read: () => saved, write: next => { if (broken) throw new Error('disk error'); saved = next } },
+    createChannel: settings => ({
+      status: () => ({ enabled: settings.enabled, enrolled: identity, killed, url: enrolledUrl || settings.url }),
+      connect: () => { connects++ },
+      dispose: () => { disposed++ },
+      enroll: async () => { identity = true; enrolledUrl = settings.url; return { enrolled: true } },
+      forget: () => { identity = false; enrolledUrl = undefined },
+      disconnect () {},
+      kill: () => { killed = true },
+      resume: () => { killed = false }
+    })
+  }
+  const manager = createControlManager(options)
+  const settings = { enabled: true, url: 'wss://cc.example/ws/v1/device', autoConnect: true }
+  assert.equal(manager.status().enabled, false)
+  assert.throws(() => manager.configure({ ...settings, url: 'ws://cc.example/ws/v1/device' }), { code: 'INSECURE_TRANSPORT' })
+  assert.throws(() => manager.configure({ ...settings, url: 'wss://cc.example/wrong' }), { code: 'INVALID_URL' })
+  manager.configure(settings)
+  assert.deepEqual(saved, settings)
+  assert.equal(disposed, 1)
+  await manager.enroll({ token: 'not-persisted-enrollment' })
+  assert.ok(!JSON.stringify(saved).includes('not-persisted-enrollment'))
+  await assert.rejects(manager.enroll({ token: 'duplicate' }), { code: 'IDENTITY_CONFLICT' })
+  const reloaded = createControlManager(options)
+  assert.equal(connects, 1)
+  broken = true
+  assert.throws(() => reloaded.configure({ ...settings, enabled: false }), { code: 'STATE_WRITE_FAILED' })
+  assert.equal(reloaded.status().enabled, true)
+  broken = false
+  reloaded.configure({ ...settings, enabled: false })
+  assert.throws(() => reloaded.configure({ ...settings, url: 'wss://other.example/ws/v1/device' }), { code: 'IDENTITY_CONFLICT' })
+  assert.throws(() => reloaded.connect(), { code: 'DISABLED' })
+  const restricted = createControlManager({ ...options, locked: { enabled: false } })
+  assert.throws(() => restricted.configure(settings), { code: 'POLICY_DENIED' })
+  const stopped = createControlManager({ ...options, forceDisabled: true })
+  assert.throws(() => stopped.configure(settings), { code: 'POLICY_DENIED' })
 })
 
 test('disabled by default / insecure url refused / not enrolled', async () => {

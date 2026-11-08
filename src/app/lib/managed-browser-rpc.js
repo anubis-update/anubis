@@ -6,7 +6,7 @@ const ALLOWED_FUNCTIONS = new Set([
   'listSerialPorts', 'loadFontList', 'listItermThemes', 'saveUserConfig',
   'watchFile', 'unwatchFile', 'listWidgets', 'runWidget', 'stopWidget',
   'runWidgetFunc', 'checkDbUpgrade', 'doUpgrade', 'getEnv', 'getHardwareInventory',
-  'browserHub'
+  'browserHub', 'cveScanner'
 ])
 const BROWSER_TABLES = new Set([
   'bookmarks', 'bookmarkGroups', 'addressBookmarks', 'terminalThemes',
@@ -24,6 +24,34 @@ function sanitizeConfig (config) {
   result.server = ''
   result.useSystemTitleBar = true
   return result
+}
+
+function dispatchCveScanner (functions, args) {
+  if (args.length !== 2) throw new Error('Invalid local CVE scanner request')
+  const [action, payload] = args
+  if (!['settings', 'configure', 'start', 'get', 'cancel', 'latest'].includes(action) || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('Invalid local CVE scanner request')
+  }
+  const keys = Object.keys(payload)
+  if (action === 'start') {
+    if (keys.length !== 1 || payload.confirmed !== true) throw new Error('Confirm public vulnerability lookups before starting Aegis')
+  } else if (action === 'configure') {
+    if (keys.length !== 3 || !keys.includes('jsModulePath') || !keys.includes('pythonModulePath') ||
+        !Number.isSafeInteger(payload.revision) || payload.revision < 0 ||
+        typeof payload.jsModulePath !== 'string' || typeof payload.pythonModulePath !== 'string' ||
+        payload.jsModulePath.length > 32768 || payload.pythonModulePath.length > 32768) {
+      throw new Error('Invalid local CVE scanner request')
+    }
+  } else if (action === 'latest' || action === 'settings') {
+    if (keys.length !== 0) throw new Error('Invalid local CVE scanner request')
+  } else if (!keys.every(key => (action === 'get' ? ['runId', 'offset', 'limit'] : ['runId']).includes(key)) ||
+      (payload.offset !== undefined && (!Number.isSafeInteger(payload.offset) || payload.offset < 0)) ||
+      (payload.limit !== undefined && (!Number.isSafeInteger(payload.limit) || payload.limit < 1 || payload.limit > 100)) ||
+      typeof payload.runId !== 'string' || !/^[a-f0-9]{32}$/i.test(payload.runId)) {
+    throw new Error('Invalid local CVE scanner request')
+  }
+  if (typeof functions.cveScanner !== 'function') throw new Error('Local CVE scanner is unavailable')
+  return functions.cveScanner(action, payload)
 }
 
 function createBrowserRpc ({ functions, getConfig, getPassword, constants, init, onAuthorizedLogin, onAuthorizedWebLogin, webPassword }) {
@@ -76,6 +104,7 @@ function createBrowserRpc ({ functions, getConfig, getPassword, constants, init,
       await functions.saveUserConfig(config)
       return true
     }
+    if (func === 'cveScanner') return dispatchCveScanner(functions, args)
     if (func === 'dbAction') {
       const [table, action] = args
       if (!(BROWSER_TABLES.has(table) || table === 'data') ||

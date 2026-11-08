@@ -238,6 +238,7 @@ function createManagedContexts ({
       else res.destroy()
     })
     if (body) upstream.end(body)
+    else if (req.readableEnded) upstream.end()
     else req.pipe(upstream)
   }
 

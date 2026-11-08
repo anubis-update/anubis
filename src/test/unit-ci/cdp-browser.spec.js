@@ -243,6 +243,48 @@ test('resize sets device metrics and restarts the screencast', async () => {
   assert.ok(c.indexOf('Page.stopScreencast') < c.indexOf('Page.startScreencast'))
 })
 
+test('tab retarget and viewport resize cannot start the same screencast concurrently', async () => {
+  const raw = { send: async () => ({ targetInfo: { url: 'https://example.org/new', title: 'New tab' } }) }
+  const clients = []
+  const warnings = []
+  let releaseEnable
+  let reachedEnable
+  const enableReached = new Promise(resolve => { reachedEnable = resolve })
+  const enableGate = new Promise(resolve => { releaseEnable = resolve })
+  const f = fixture({
+    launcher: async () => ({ client: raw, close () {} }),
+    cdpClient: async (handle, { targetId = 'initial' } = {}) => {
+      const client = fakeClient()
+      client.targetId = targetId
+      let streaming = false
+      client.responders['Page.startScreencast'] = () => {
+        if (streaming) throw new Error('Screencast is already active')
+        streaming = true
+        return {}
+      }
+      client.responders['Page.stopScreencast'] = () => { streaming = false; return {} }
+      if (targetId === 'new') {
+        client.responders['Page.enable'] = async () => { reachedEnable(); await enableGate; return {} }
+      }
+      clients.push(client)
+      return client
+    },
+    log: { warn: (...args) => warnings.push(args.join(' ')) }
+  })
+  await f.cdp.open({ id: 'a', url: 'https://example.org' })
+  const retarget = f.cdp.activateTarget(raw, 'new')
+  await enableReached
+  const resize = f.cdp.resize({ id: 'a', width: 1200, height: 900 })
+  await new Promise(resolve => setImmediate(resolve))
+  releaseEnable()
+  await Promise.all([retarget, resize])
+  assert.deepEqual(warnings, [])
+  assert.equal(f.cdp._sessions.get('a').client, clients[1])
+  assert.equal(clients[1].paramsFor('Emulation.setDeviceMetricsOverride').width, 1280)
+  assert.equal(clients[1].sent.filter(call => call.method === 'Emulation.setDeviceMetricsOverride').at(-1).params.width, 1200)
+  f.cdp.disposeAll()
+})
+
 test('nav goto/reload issue the matching CDP calls', async () => {
   const f = fixture()
   await f.cdp.open({ id: 'a', url: 'https://a.com' })

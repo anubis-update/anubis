@@ -79,6 +79,8 @@ function createCdpDriver ({
   allowExtensions = () => false,
   resolveSource,
   readDevModePolicy,
+  extensionStateForHandle,
+  onActiveTarget = async () => {},
   makeNavGuard = createNavGuard,
   makeDownloads = createDownloadTracker,
   makeStorage = createStorageDriver,
@@ -147,34 +149,65 @@ function createCdpDriver ({
       extraFlags: sanitizeFlags(flags),
       unsafeExtensionDebugging: !!allowExtensions()
     })
+    try {
+      return await attach(handle, { browserId, profileId, profileMode, headless })
+    } catch (e) {
+      handle.close()
+      throw e
+    }
+  }
+
+  async function attach (handle, { browserId = idGen('b_'), profileId = handle.profileId, profileMode = 'managed-copy', headless = false, sessionId, targetId } = {}) {
+    const existing = [...browsers.values()].find((b) => b.handle.client === handle.client)
+    if (existing) {
+      if (sessionId) existing.sessionIds.add(sessionId)
+      await existing.ready
+      await activateTarget(existing, targetId)
+      emit('browser.attached', { browserId: existing.browserId, data: {} })
+      return { browserId: existing.browserId, engine }
+    }
+    const listeners = []
+    const client = {
+      send: (...args) => handle.client.send(...args),
+      on: (...args) => {
+        const off = handle.client.on(...args)
+        if (typeof off === 'function') listeners.push(off)
+        return off
+      }
+    }
+    const disposeListeners = () => { for (const off of listeners.splice(0)) off() }
     const guard = typeof checkUrl === 'function'
-      ? makeNavGuard({ client: handle.client, checkUrl, emit: (event, e) => emit(event, { browserId, ...e }) })
+      ? makeNavGuard({ client, checkUrl, emit: (event, e) => emit(event, { browserId, ...e }) })
       : null
     const tabs = makeTabs({
-      client: handle.client,
-      limits,
+      client,
+      limits: getLimits(),
       emit: (event, e) => emit(event, { browserId, ...e }),
       onSession: guard ? (sessionId, tabId) => guard.attach(sessionId, tabId) : undefined
     })
     const page = makePage({ tabs })
-    const downloads = makeDownloads({ client: handle.client })
-    const b = { browserId, handle, tabs, page, downloads, profileId: profileId || 'default', profileMode, headless: !!headless }
+    const downloads = makeDownloads({ client })
+    const b = { browserId, handle, tabs, page, downloads, disposeListeners, sessionIds: new Set(sessionId ? [sessionId] : []), profileId: profileId || 'default', profileMode, headless: !!headless }
     browsers.set(browserId, b)
     if (typeof handle.onExit === 'function') {
       handle.onExit(() => {
         if (browsers.get(browserId) === b) {
           browsers.delete(browserId)
           tabs.dispose()
+          disposeListeners()
           emit('browser.closed', { browserId, data: { reason: 'exited' } })
         }
       })
     }
     try {
-      await tabs.init()
-      await downloads.start()
+      b.ready = (async () => { await tabs.init(); await downloads.start() })()
+      await b.ready
+      if (extensionStateForHandle && allowExtensions()) await extensionsOf(browserId).restore()
+      await activateTarget(b, targetId)
     } catch (e) {
       browsers.delete(browserId)
-      try { handle.close() } catch {}
+      tabs.dispose()
+      disposeListeners()
       throw e
     }
     emit('browser.launched', { browserId, data: { engine } })
@@ -185,14 +218,51 @@ function createCdpDriver ({
     const b = entry(browserId)
     browsers.delete(browserId)
     b.tabs.dispose()
+    b.disposeListeners()
     try { b.handle.close() } catch {}
     emit('browser.closed', { browserId, data: { reason: 'closed' } })
     return { closed: true }
   }
 
+  function detachSession (sessionId) {
+    for (const b of browsers.values()) {
+      if (!b.sessionIds.delete(sessionId) || b.sessionIds.size) continue
+      browsers.delete(b.browserId)
+      b.tabs.dispose()
+      b.disposeListeners()
+      emit('browser.closed', { browserId: b.browserId, data: { reason: 'view-closed' } })
+    }
+  }
+
+  async function syncView (b) {
+    const { activeTabId } = b.tabs.list({ includeInternal: true })
+    if (activeTabId) await onActiveTarget(b.handle.client, b.tabs.get(activeTabId).targetId)
+  }
+
+  async function activateTarget (b, targetId) {
+    if (!targetId) return
+    const tab = b.tabs.list({ includeInternal: true }).tabs.find(t => b.tabs.get(t.tabId).targetId === targetId)
+    if (tab) await b.tabs.activate(tab.tabId)
+  }
+
   function track (browserId, info) {
     tabOwner.set(info.tabId, browserId)
     return { ...info, browserId }
+  }
+
+  function extensionsOf (browserId) {
+    const b = entry(browserId)
+    if (!b.extensions) {
+      b.extensions = makeExtensions({
+        client: b.handle.client,
+        tabs: b.tabs,
+        engine,
+        resolveSource,
+        readDevModePolicy,
+        extensionState: extensionStateForHandle && extensionStateForHandle(b.handle)
+      })
+    }
+    return b.extensions
   }
 
   return assertDriver({
@@ -202,9 +272,11 @@ function createCdpDriver ({
     ownsTab: (tabId) => { try { ownerOfTab(tabId); return true } catch { return false } },
     browserOf: (tabId) => ownerOfTab(tabId).browserId,
     listBrowsers: () => [...browsers.values()].map((b) => ({
-      browserId: b.browserId, engine, profileMode: b.profileMode, headless: b.headless, tabCount: b.tabs.count(), ...(b.profileId !== 'default' ? { profileId: b.profileId } : {})
+      browserId: b.browserId, engine, profileMode: b.profileMode, headless: b.headless, tabCount: b.tabs.count(), sessionIds: [...b.sessionIds], ...(b.profileId !== 'default' ? { profileId: b.profileId } : {})
     })),
     launch,
+    attach,
+    detachSession,
     closeBrowser,
     listTabs (browserId, opts) {
       const b = entry(browserId)
@@ -214,13 +286,20 @@ function createCdpDriver ({
     async newTab (browserId, opts) {
       const b = entry(browserId)
       const r = await b.tabs.newTab(opts)
+      if (!opts || opts.activate !== false) await syncView(b)
       return { tab: track(browserId, r.tab) }
     },
-    activateTab: (tabId) => ownerOfTab(tabId).tabs.activate(tabId),
+    async activateTab (tabId) {
+      const b = ownerOfTab(tabId)
+      const result = await b.tabs.activate(tabId)
+      await syncView(b)
+      return result
+    },
     async closeTab (tabId) {
       const b = ownerOfTab(tabId)
       const r = await b.tabs.close(tabId)
       b.page.forget(tabId)
+      await syncView(b)
       return r
     },
     navigate (tabId, kind, opts = {}) {
@@ -265,22 +344,15 @@ function createCdpDriver ({
       return historyReader.search({ historyPath: path.join(dir, 'History'), ...query })
     },
 
-    extensionsOf (browserId) {
-      const b = entry(browserId)
-      if (!b.extensions) {
-        b.extensions = makeExtensions({
-          client: b.handle.client,
-          tabs: b.tabs,
-          engine,
-          resolveSource,
-          readDevModePolicy
-        })
-      }
-      return b.extensions
-    },
+    extensionsOf,
     storage: (tabId) => makeStorage({ tabs: ownerOfTab(tabId).tabs }),
     downloads: (browserId, opts) => entry(browserId).downloads.list(opts),
     clearHistory: (browserId, opts) => makeHistoryClearer({ tabs: entry(browserId).tabs, engine })(opts),
+    nativePasswordTransfer (browserId, transfer, options) {
+      const b = entry(browserId)
+      if (b.headless) throw apiError('CAPABILITY_MISSING', 'Native password transfer requires a visible managed browser')
+      return transfer({ ...options, engine, tabs: b.tabs, client: b.handle.client, pid: b.handle.child && b.handle.child.pid })
+    },
 
     shutdown () {
       for (const id of [...browsers.keys()]) closeBrowser(id).catch(() => {})

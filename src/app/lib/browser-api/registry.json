@@ -86,12 +86,45 @@
       "type": "object", "required": ["extensionId", "name"],
       "properties": {
         "extensionId": { "$ref": "common.schema.json#/$defs/extensionId" }, "name": { "type": "string" }, "version": { "type": "string" },
-        "enabled": { "type": "boolean" }, "manifestVersion": { "enum": [2, 3] }, "installType": { "enum": ["unpacked", "store", "policy", "other"] },
+        "enabled": { "type": "boolean" }, "installed": { "type": "boolean" }, "mayModify": { "type": "boolean" }, "mayRemove": { "type": "boolean" },
+        "manifestVersion": { "enum": [2, 3] }, "installType": { "enum": ["unpacked", "store", "policy", "other"] },
         "permissions": { "type": "array", "items": { "type": "string" } }, "hostPermissions": { "type": "array", "items": { "type": "string" } }
       }
     }
   },
   "commands": [
+    {
+      "name": "aegis.settings", "risk": "read", "agentDefault": "deny", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "properties": {} }
+    },
+    {
+      "name": "aegis.configure", "risk": "write", "agentDefault": "deny", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "required": ["jsModulePath", "pythonModulePath", "revision"], "properties": {
+        "jsModulePath": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "pythonModulePath": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "revision": { "type": "integer", "minimum": 0 }
+      } }
+    },
+    {
+      "name": "aegis.start", "risk": "write", "agentDefault": "deny", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "required": ["confirmed"], "properties": { "confirmed": { "const": true } } }
+    },
+    {
+      "name": "aegis.latest", "risk": "read", "agentDefault": "deny", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "properties": {} }
+    },
+    {
+      "name": "aegis.get", "risk": "read", "agentDefault": "deny", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "required": ["runId"], "properties": {
+        "runId": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+      } }
+    },
+    {
+      "name": "aegis.cancel", "risk": "write", "agentDefault": "deny", "requires": [],
+      "params": { "type": "object", "additionalProperties": false, "required": ["runId"], "properties": { "runId": { "type": "string", "pattern": "^[a-f0-9]{32}$" } } }
+    },
     {
       "name": "api.capabilities", "mcp": "anubis_capabilities", "risk": "read", "agentDefault": "allow", "requires": [],
       "params": { "type": "object", "additionalProperties": false, "properties": { "clientVersions": { "type": "array", "items": { "type": "integer" } } } },
@@ -183,6 +216,11 @@
       "result": { "$ref": "#/$defs/NavResult" }
     },
     {
+      "name": "page.title", "mcp": "page_title", "risk": "read", "agentDefault": "allow", "requires": ["page.snapshot"], "scope": "tabId",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "required": ["title", "url", "untrusted"], "properties": { "title": { "type": "string" }, "url": { "type": "string" }, "untrusted": { "const": true } } }
+    },
+    {
       "name": "page.snapshot", "mcp": "page_snapshot", "risk": "read", "agentDefault": "allow", "requires": ["page.snapshot"], "scope": "tabId",
       "params": { "type": "object", "additionalProperties": false, "properties": {
         "mode": { "enum": ["ax", "ax+dom", "text"], "default": "ax" },
@@ -256,6 +294,11 @@
       "result": { "type": "object", "properties": { "value": {}, "type": { "type": "string" }, "exception": { "type": "string" } } }
     },
     {
+      "name": "site.domains", "mcp": "site_domains", "risk": "sensitive", "agentDefault": "confirm", "requires": ["cookies"], "scope": "browserId",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "required": ["browserId", "engine", "profileId", "domains", "excludedCount"], "properties": { "browserId": { "type": "string" }, "engine": { "type": "string" }, "profileId": { "type": "string" }, "profileMode": { "type": "string" }, "domains": { "type": "array", "maxItems": 1000, "items": { "type": "string" } }, "excludedCount": { "type": "integer" } } }
+    },
+    {
       "name": "cookies.export", "mcp": "cookies_export", "risk": "sensitive", "agentDefault": "deny", "requires": ["cookies"], "scope": "browserId", "x-note": "Только через CDP Storage.getCookies/Network.getAllCookies. Значения cookie НЕ возвращаются агенту, если не включён mode=values и явное подтверждение человека; по умолчанию — вывод в зашифрованный файл на ПК.",
       "params": { "type": "object", "additionalProperties": false, "properties": { "domains": { "type": "array", "maxItems": 100, "items": { "type": "string" } }, "mode": { "enum": ["metadata", "file", "values"], "default": "metadata" }, "encryptTo": { "type": "string", "description": "Идентификатор локального назначения (stagedId/vault), не путь." } } },
       "result": { "type": "object", "required": ["count"], "properties": { "count": { "type": "integer" }, "cookies": { "type": "array", "items": { "$ref": "#/$defs/Cookie" } }, "artifactId": { "type": "string" } } }
@@ -313,7 +356,7 @@
     {
       "name": "extension.list", "mcp": "extension_list", "risk": "read", "agentDefault": "allow", "requires": ["extensions"], "scope": "browserId",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
-      "result": { "type": "object", "properties": { "extensions": { "type": "array", "items": { "$ref": "#/$defs/ExtensionInfo" } } } }
+      "result": { "type": "object", "properties": { "extensions": { "type": "array", "items": { "$ref": "#/$defs/ExtensionInfo" } }, "developerMode": { "type": "boolean" }, "running": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/extensionId" } } } }
     },
     {
       "name": "extension.install", "mcp": "extension_install", "risk": "dangerous", "agentDefault": "deny", "requires": ["extensions.loadUnpacked"], "scope": "browserId", "idempotent": true,
