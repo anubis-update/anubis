@@ -32,7 +32,7 @@ test('init lists page targets only', async () => {
 })
 
 test('newTab enforces limit and marks agent-created', async () => {
-  const { mgr, client, events } = setup()
+  const { mgr, events } = setup()
   await mgr.init()
   const r = await mgr.newTab({ url: 'https://b.test' })
   assert.ok(r.tab.tabId)
@@ -54,7 +54,7 @@ test('goto attaches flattened session and waits for load', async () => {
   const { mgr, client } = setup()
   const { tabs } = await mgr.init()
   const p = mgr.goto(tabs[0].tabId, 'https://c.test/', { waitUntil: 'load', timeoutMs: 500 })
-  await new Promise(r => setTimeout(r, 20))
+  await new Promise(resolve => setTimeout(resolve, 20))
   client.emit('Page.loadEventFired', {}, 'S_T1')
   const res = await p
   assert.equal(res.loaded, true)

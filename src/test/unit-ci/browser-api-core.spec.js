@@ -1,4 +1,4 @@
-﻿const { test } = require('node:test')
+const { test } = require('node:test')
 const assert = require('node:assert/strict')
 const { createRedactor } = require('../../app/lib/browser-api/redactor')
 const { createPolicyEngine, isPrivateHost, DEFAULT_POLICY } = require('../../app/lib/browser-api/policy-engine')
@@ -141,4 +141,3 @@ test('confirmations: no approver -> CONFIRMATION_REQUIRED; only local token deci
   c.decide(c.list()[0].confirmationId, false, c.localToken())
   await assert.rejects(p2, (e) => e.code === 'CONFIRMATION_REJECTED')
 })
-

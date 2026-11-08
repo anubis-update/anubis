@@ -96,7 +96,7 @@ test('agent browser.launch needs confirmation; with no local approver -> CONFIRM
   assert.equal((await api.dispatcher.execute(req, agent)).error.code, 'CONFIRMATION_REQUIRED')
   api.confirmations.registerApprover()
   const p = api.dispatcher.execute(req, agent)
-  await new Promise((r) => setTimeout(r, 10))
+  await new Promise((resolve) => setTimeout(resolve, 10))
   api.confirmations.decide(api.confirmations.list()[0].confirmationId, true, api.confirmations.localToken())
   assert.equal((await p).ok, true)
 })

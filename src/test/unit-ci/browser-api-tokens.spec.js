@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const { createTokenStore } = require('../../app/lib/browser-api/v1-api')
 
 test('list never exposes token material; revoke removes one token only', () => {
-  let t = 1000
+  const t = 1000
   const s = createTokenStore({ now: () => t })
   const a = s.issue('agent', 60000, { label: 'my agent' })
   const b = s.issue('operator', 60000)

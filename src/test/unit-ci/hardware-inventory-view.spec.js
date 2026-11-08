@@ -43,7 +43,9 @@ test('System Info renders reported antivirus, process privilege and bounded inst
   const { hardwareDetails } = await import('../../client/common/hardware-inventory-view.mjs')
   const value = hardwareDetails({
     client: {
-      status: 'ok', collectedAt: 1793620800000, role: 'system',
+      status: 'ok',
+      collectedAt: 1793620800000,
+      role: 'system',
       security: { status: 'ok', products: ['Microsoft Defender Antivirus'] },
       software: { status: 'ok', scope: 'machine+current-user', truncated: true, items: [{ name: 'Anubis', version: '5.7.44' }] }
     }

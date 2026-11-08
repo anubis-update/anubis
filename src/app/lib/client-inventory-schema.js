@@ -1,5 +1,13 @@
 const MAX_SOFTWARE = 100
-const text = value => typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160).trim() : ''
+function text (value) {
+  if (typeof value !== 'string') return ''
+  let cleaned = ''
+  for (const char of value) {
+    const code = char.charCodeAt(0)
+    cleaned += (code < 32 || code === 127) ? ' ' : char
+  }
+  return cleaned.replace(/\s+/g, ' ').trim().slice(0, 160).trim()
+}
 const statuses = new Set(['collecting', 'ok', 'unavailable', 'error', 'timeout'])
 
 function normalizeClientInventory (raw) {
@@ -35,7 +43,11 @@ function normalizeClientInventory (raw) {
     return { name: item.name, version: item.version }
   })
   return {
-    version: 1, status: raw.status, collectedAt: raw.collectedAt, role: raw.role, ipv4,
+    version: 1,
+    status: raw.status,
+    collectedAt: raw.collectedAt,
+    role: raw.role,
+    ipv4,
     security: { status: raw.security.status, products },
     software: { status: raw.software.status, scope: raw.software.scope, truncated: raw.software.truncated, items }
   }

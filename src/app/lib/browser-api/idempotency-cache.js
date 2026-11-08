@@ -34,9 +34,9 @@ function createIdempotencyCache ({ ttlMs = 15 * 60 * 1000, max = 4096, now = () 
     const k = keyOf(actor, requestId)
     const e = map.get(k)
     if (!e) {
-      let resolve
-      const promise = new Promise((r) => { resolve = r })
-      map.set(k, { hash, at: now(), pending: true, promise, resolve })
+      let settle
+      const promise = new Promise((resolve) => { settle = resolve })
+      map.set(k, { hash, at: now(), pending: true, promise, resolve: settle })
       return { state: 'new' }
     }
     if (e.hash !== hash) return { state: 'conflict' }

@@ -78,7 +78,7 @@ function sanitize (doc) {
   out.confirmation = { timeoutSec: timeout, channel: 'local-ui', rememberMinutes: 0 }
   const rd = isObj(doc.redaction) ? doc.redaction : {}
   const patterns = strList(rd.maskPatterns, 'redaction.maskPatterns', /^[\s\S]{1,200}$/, 50)
-  for (const p of patterns) { try { new RegExp(p) } catch { throw bad('redaction.maskPatterns') } }
+  for (const p of patterns) { try { const compiled = new RegExp(p); if (!compiled) throw bad('redaction.maskPatterns') } catch { throw bad('redaction.maskPatterns') } }
   out.redaction = { maskPasswordFields: true, maskPatterns: patterns, stripKnownSecrets: true }
   const a = isObj(doc.audit) ? doc.audit : {}
   const retain = a.retainDays === undefined ? DEFAULT_POLICY.audit.retainDays : a.retainDays

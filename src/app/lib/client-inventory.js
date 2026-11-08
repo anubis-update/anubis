@@ -65,7 +65,10 @@ if ($result.security.status -ne 'ok' -or $result.software.status -ne 'ok') { $re
 
 function createClientInventory ({ platform = process.platform, env = process.env, spawn: launch = spawn, now = Date.now, timeoutMs = 20000, ttlMs = 15 * 60 * 1000, onError = error => console.warn('Client inventory collection failed:', error.code || 'COLLECTOR_FAILED') } = {}) {
   const empty = status => ({
-    version: 1, status, collectedAt: null, role: null,
+    version: 1,
+    status,
+    collectedAt: null,
+    role: null,
     security: { status, products: [] },
     software: { status, scope: platform === 'win32' ? 'machine+current-user' : 'unsupported', truncated: false, items: [] }
   })
@@ -83,7 +86,7 @@ function createClientInventory ({ platform = process.platform, env = process.env
     pending = new Promise(resolve => {
       let child
       let finished = false
-      let timer
+      let timer = null
       let output = ''
       let size = 0
       const decoder = new StringDecoder('utf8')

@@ -5,7 +5,10 @@ const { PassThrough } = require('node:stream')
 const { createClientInventory, normalizeClientInventory, script } = require('../../app/lib/client-inventory')
 
 const record = () => ({
-  version: 1, status: 'ok', collectedAt: null, role: 'system',
+  version: 1,
+  status: 'ok',
+  collectedAt: null,
+  role: 'system',
   security: { status: 'ok', products: ['Microsoft Defender Antivirus'] },
   software: { status: 'ok', scope: 'machine+current-user', truncated: false, items: [{ name: 'Anubis', version: '5.7.44' }] }
 })
@@ -40,7 +43,9 @@ test('client collection is cached, single-flight, bounded, and safely decodes sp
   let calls = 0
   let launched
   const collector = createClientInventory({
-    platform: 'win32', now: () => time, onError: error => assert.fail(error.message),
+    platform: 'win32',
+    now: () => time,
+    onError: error => assert.fail(error.message),
     spawn (command, args, options) {
       calls++
       assert(command.endsWith('\\powershell.exe'))
@@ -78,13 +83,17 @@ test('collection reports timeout, excessive output and malformed snapshots expli
     let launched
     const errors = []
     const collector = createClientInventory({
-      platform: 'win32', timeoutMs: 10, onError: error => errors.push(error),
+      platform: 'win32',
+      timeoutMs: 10,
+      onError: error => errors.push(error),
       spawn () {
         launched = child()
-        if (mode !== 'timeout') setImmediate(() => {
-          launched.stdout.write(mode === 'oversize' ? 'x'.repeat(130 * 1024) : 'ANUBIS_CLIENT_INVENTORY {"version":1}')
-          launched.emit('close', 0)
-        })
+        if (mode !== 'timeout') {
+          setImmediate(() => {
+            launched.stdout.write(mode === 'oversize' ? 'x'.repeat(130 * 1024) : 'ANUBIS_CLIENT_INVENTORY {"version":1}')
+            launched.emit('close', 0)
+          })
+        }
         return launched
       }
     })

@@ -100,7 +100,7 @@ function createDispatcher ({
       try { await driver.navigate(tabId, 'goto', { url: 'about:blank', waitUntil: 'none' }) } catch {}
       throw apiError('POLICY_DENIED', 'Navigation blocked by policy: ' + r.reason)
     }
-    void signal
+    return signal
   }
 
   async function execute (req, actor = { id: 'anonymous', role: 'agent', kind: 'agent' }) {

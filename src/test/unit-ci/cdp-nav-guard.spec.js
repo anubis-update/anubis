@@ -4,7 +4,7 @@ const { createNavGuard } = require('../../app/lib/cdp-nav-guard')
 const { createFakeCdp } = require('./browser-hub-fake-cdp')
 const { createPolicyEngine, DEFAULT_POLICY } = require('../../app/lib/browser-api/policy-engine')
 
-const tick = () => new Promise((r) => setTimeout(r, 5))
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
 
 test('enables Fetch for http(s) documents only', async () => {
   const c = createFakeCdp()

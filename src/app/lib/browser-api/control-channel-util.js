@@ -66,8 +66,8 @@ const helloMessage = (deviceId, nonce, challenge) => `anubis-hello-v1\n${deviceI
 const welcomeMessage = (sessionId, nonce, challenge) => `anubis-welcome-v1\n${sessionId}\n${nonce}\n${challenge}`
 
 function frameForSig (frame) {
-  const { sig, ...rest } = frame
-  void sig
+  const rest = { ...frame }
+  delete rest.sig
   return canonical(rest)
 }
 
