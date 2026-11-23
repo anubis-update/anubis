@@ -77,3 +77,75 @@ test('runtime uses the directory, then the backup domain, then the other gateway
     await runtime.stop()
   }
 })
+
+test('runtime stays on a gateway until repeated transport failures and ignores other offline errors', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'anubis-fleet-threshold-'))
+  const bases = []
+  let report
+  const runtime = createFleetRuntime({
+    userData: dir,
+    port: 9,
+    header: 'ab'.repeat(32),
+    version: '5.7.53',
+    failuresBeforeSwitch: 3,
+    identityImpl: () => ({ id: '11111111-1111-4111-8111-111111111111' }),
+    fetchImpl: async () => ({ ok: true, json: async () => document }),
+    onStatus () {},
+    createAgent ({ baseUrl, onStatus }) {
+      bases.push(baseUrl)
+      report = onStatus
+      return { id: 'agent', start () {}, async stop () {} }
+    }
+  })
+  runtime.start()
+  try {
+    const started = Date.now() + 1000
+    while (bases.length < 1 && Date.now() < started) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(bases.length, 1)
+    const first = bases[0]
+    report({ status: 'offline', error: 'Enrollment rejected: HTTP 403' })
+    report({ status: 'offline', error: 'fetch failed' })
+    report({ status: 'online' })
+    report({ status: 'offline', error: 'fetch failed' })
+    report({ status: 'offline', error: 'fetch failed' })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.deepEqual(bases, [first])
+    report({ status: 'offline', error: 'ECONNREFUSED' })
+    const moved = Date.now() + 1000
+    while (bases.length < 2 && Date.now() < moved) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(bases.length, 2)
+    assert.notEqual(new URL(bases[1]).hostname, new URL(first).hostname)
+  } finally {
+    await runtime.stop()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('runtime reports offline without spawning when the fleet directory is unavailable', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'anubis-fleet-unavailable-'))
+  let spawned = false
+  const reports = []
+  const runtime = createFleetRuntime({
+    userData: dir,
+    port: 9,
+    header: 'cd'.repeat(32),
+    version: '5.7.53',
+    identityImpl: () => ({ id: '11111111-1111-4111-8111-111111111111' }),
+    fetchImpl: async () => { throw new Error('down') },
+    onStatus (status) { reports.push(status) },
+    createAgent () {
+      spawned = true
+      return { start () {}, async stop () {} }
+    }
+  })
+  runtime.start()
+  try {
+    const deadline = Date.now() + 1000
+    while (reports.length < 1 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.deepEqual(reports[0], { status: 'offline', error: 'Fleet directory unavailable' })
+    assert.equal(spawned, false)
+  } finally {
+    await runtime.stop()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

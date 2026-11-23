@@ -38,6 +38,57 @@ test('client inventory schema bounds software and role and excludes paths, accou
   assert(script().includes('SecurityCenter2'))
 })
 
+test('client inventory keeps routable addresses and explicit antivirus state', () => {
+  const raw = record()
+  raw.ipv4 = [
+    '10.1.2.3',
+    '10.1.2.3',
+    '127.0.0.1',
+    '169.254.1.1',
+    '256.1.1.1',
+    'not-an-ip',
+    8,
+    '192.168.0.10',
+    '8.8.8.8',
+    '1.1.1.1',
+    '9.9.9.9',
+    '4.4.4.4',
+    '1.0.0.1',
+    '8.8.4.4',
+    '208.67.222.222'
+  ]
+  raw.security.products = [
+    { name: 'Microsoft Defender Antivirus', enabled: true },
+    { name: 'Other', enabled: false },
+    { name: 'Unknown' }
+  ]
+  const normalized = normalizeClientInventory(raw)
+  assert.deepEqual(normalized.ipv4, [
+    '10.1.2.3',
+    '192.168.0.10',
+    '8.8.8.8',
+    '1.1.1.1',
+    '9.9.9.9',
+    '4.4.4.4',
+    '1.0.0.1',
+    '8.8.4.4'
+  ])
+  assert.deepEqual(normalized.security.products, [
+    { name: 'Microsoft Defender Antivirus', enabled: true },
+    { name: 'Other', enabled: false },
+    { name: 'Unknown', enabled: null }
+  ])
+  assert.deepEqual(normalizeClientInventory(record()).ipv4, [])
+  assert.throws(() => normalizeClientInventory({
+    ...record(),
+    security: { status: 'ok', products: [{ name: 'Defender', enabled: 'yes' }] }
+  }))
+  assert.throws(() => normalizeClientInventory({
+    ...record(),
+    security: { status: 'ok', products: ['Name\u007f'] }
+  }))
+})
+
 test('client collection is cached, single-flight, bounded, and safely decodes split UTF-8 product names', async () => {
   let time = 10
   let calls = 0
