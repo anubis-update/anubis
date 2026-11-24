@@ -89,6 +89,38 @@ test('a control-center task on an unattended machine launches without a local ap
   assert.equal(api.confirmations.list().length, 0)
 })
 
+test('unattended approval is limited to a control-center remote actor', async () => {
+  const { api } = build({ unattendedRemote: true })
+  const remote = { id: 'remote', role: 'agent', kind: 'remote', transport: 'control-center' }
+  const launch = { engine: 'chrome' }
+  for (const actor of [
+    { id: 'local-agent', role: 'agent', kind: 'agent' },
+    { id: 'remote-on-local-transport', role: 'agent', kind: 'remote', transport: 'local-rest' },
+    { id: 'local-kind-on-control-center', role: 'agent', kind: 'agent', transport: 'control-center' }
+  ]) {
+    const result = await run(api, 'browser.launch', launch, actor)
+    assert.equal(result.error && result.error.code, 'CONFIRMATION_REQUIRED', actor.id)
+  }
+  assert.equal(api.hub.allBrowsers().length, 0)
+  assert.equal(api.confirmations.list().length, 0)
+
+  const attended = build()
+  const blocked = await run(attended.api, 'browser.launch', launch, remote)
+  assert.equal(blocked.error.code, 'CONFIRMATION_REQUIRED')
+  assert.equal(attended.api.hub.allBrowsers().length, 0)
+
+  const opened = await run(api, 'browser.launch', launch, admin)
+  assert.equal(opened.ok, true, JSON.stringify(opened))
+  const browserId = opened.result.browserId
+  const domains = await run(api, 'site.domains', {}, remote, { browserId })
+  assert.equal(domains.ok, true, JSON.stringify(domains))
+  assert.equal(JSON.stringify(domains).includes(CANARY), false)
+  assert.equal(api.confirmations.list().length, 0)
+  const cookies = await run(api, 'cookies.export', {}, remote, { browserId })
+  assert.equal(cookies.error.code, 'POLICY_DENIED')
+  assert.equal(JSON.stringify(cookies).includes(CANARY), false)
+})
+
 test('agent browser.launch needs confirmation; with no local approver -> CONFIRMATION_REQUIRED and not cached', async () => {
   const { api } = build()
   const id = rid()

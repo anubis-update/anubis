@@ -27,9 +27,18 @@ test('validator supports enum, oneOf and const', () => {
 
 test('errors map to HTTP status and never leak internals', () => {
   assert.equal(httpStatusFor('POLICY_DENIED'), 403)
-  const e = toWireError(new Error('C:\\secret\\path boom'))
-  assert.equal(e.code, 'INTERNAL')
-  assert.ok(!JSON.stringify(e).includes('secret'))
+  const leaked = { code: 'INTERNAL', message: 'Internal error', retryable: false }
+  for (const thrown of [
+    new Error('C:\\secret\\path boom'),
+    Object.assign(new Error('C:\\secret\\path boom'), { code: 'ENOENT' }),
+    Object.assign(new Error('token=secret'), { code: 'STATE_READ_FAILED' })
+  ]) {
+    assert.deepEqual(toWireError(thrown), leaked)
+  }
+  const known = toWireError(Object.assign(new Error('busy'), { code: 'BUSY', retryAfterMs: 1000 }))
+  assert.equal(known.code, 'BUSY')
+  assert.equal(known.message, 'busy')
+  assert.equal(known.retryAfterMs, 1000)
   assert.equal(toWireError(apiError('STALE_REF', 'm')).code, 'STALE_REF')
   assert.equal(safeUrl('https://a.test/p?token=1#x'), 'https://a.test/p')
 })

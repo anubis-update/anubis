@@ -126,6 +126,29 @@ test('util: canonical, sign/verify, scrub', () => {
   assert.deepEqual(s, { a: { cookies: '[redacted]', Password: '[redacted]', ok: 1 }, list: [{ authorization: '[redacted]' }] })
 })
 
+test('a malformed control-center identity fails closed instead of looking unenrolled', () => {
+  for (const doc of [
+    [],
+    'identity',
+    1,
+    { v: 2, deviceId: 'd', privateKey: 'wrapped' },
+    { deviceId: 'd', privateKey: 'wrapped' }
+  ]) {
+    const store = createControlStore({ io: { read: () => doc, write () {} } })
+    assert.throws(() => store.identity(), { code: 'STATE_READ_FAILED' })
+    assert.throws(() => store.identity(), { code: 'STATE_READ_FAILED' })
+    assert.throws(() => store.killed(), { code: 'STATE_READ_FAILED' })
+  }
+  const blankKey = createControlStore({
+    io: { read: () => ({ v: 1, deviceId: 'd', privateKey: 'wrapped' }), write () {} },
+    unprotect: () => ''
+  })
+  assert.throws(() => blankKey.identity(), { code: 'STATE_READ_FAILED' })
+  const absent = createControlStore({ io: { read: () => null, write () {} } })
+  assert.equal(absent.identity(), null)
+  assert.equal(absent.killed(), false)
+})
+
 test('store: private key is protected at rest and absent from status/public data', () => {
   const { store, raw } = memStore({ p: (s) => 'enc:' + s, u: (s) => s.replace(/^enc:/, '') })
   assert.equal(store.identity(), null)
