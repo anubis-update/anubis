@@ -64,6 +64,54 @@ test('Hub data tools: only encrypted artifacts and native UI, generic secret com
   }
 })
 
+test('native password manager opens only after policy allows Chrome or Edge', async () => {
+  const opened = []
+  function controller (engine, effect) {
+    const driver = {
+      engine,
+      newTab: async (id, params) => {
+        opened.push({ id, url: params.url, activate: params.activate })
+        return { tab: params }
+      }
+    }
+    const evaluations = []
+    const leases = []
+    const audits = []
+    const api = {
+      hub: { forBrowser: () => driver },
+      policy: {
+        evaluate: input => {
+          evaluations.push(input)
+          return { effect }
+        }
+      },
+      leases: { check: lease => leases.push(lease) },
+      audit: { record: entry => audits.push(entry) }
+    }
+    return { hub: createBrowserHubController({ api, tokens: {} }), evaluations, leases, audits }
+  }
+  const denied = controller('chrome', 'deny')
+  const deniedResult = await denied.hub.handle('passwords.openNative', { browserId: 'b_1', confirmed: true })
+  assert.equal(deniedResult.error.code, 'POLICY_DENIED')
+  assert.deepEqual(denied.evaluations, [{ role: 'admin', command: 'passwords.import', risk: 'sensitive', engine: 'chrome' }])
+  assert.equal(denied.leases.length, 0)
+  assert.equal(denied.audits.length, 0)
+  const forged = controller('chrome', 'allow')
+  assert.equal((await forged.hub.handle('passwords.openNative', { browserId: 'b_1', confirmed: 'true' })).error.code, 'INVALID_REQUEST')
+  assert.equal(forged.evaluations.length, 0)
+  const other = controller('firefox', 'allow')
+  assert.equal((await other.hub.handle('passwords.openNative', { browserId: 'b_ff', confirmed: true })).error.code, 'NOT_SUPPORTED_BY_ENGINE')
+  assert.equal(other.audits.length, 0)
+  const edge = controller('edge', 'allow')
+  const edgeResult = await edge.hub.handle('passwords.openNative', { browserId: 'b_edge', confirmed: true })
+  assert.equal(edgeResult.ok, true)
+  assert.equal(edgeResult.result.tab.url, 'edge://wallet/passwords')
+  assert.deepEqual(opened, [{ id: 'b_edge', url: 'edge://wallet/passwords', activate: true }])
+  assert.deepEqual(edge.leases, [{ browserId: 'b_edge', actor: 'ui', role: 'admin' }])
+  assert.equal(edge.audits[0].decision.rule, 'explicit-admin-native-ui')
+  for (const item of [denied, forged, other, edge]) item.hub.dispose()
+})
+
 test('cookie imports recheck policy after decryption and serialize transfers', async () => {
   const f = fixture()
   const transfer = createCookieTransfer({ api: f.api, actor: { id: 'ui', role: 'admin' } })

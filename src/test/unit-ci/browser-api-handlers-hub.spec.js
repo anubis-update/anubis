@@ -94,6 +94,53 @@ test('storage, downloads and history.clear', async () => {
   assert.deepEqual(await run('history.clear', { since: 1 }), { cleared: true, b: 'b1', o: { since: 1, until: undefined } })
 })
 
+test('page.title returns bounded untrusted metadata and rejects a bad evaluation', async () => {
+  const calls = []
+  const handlers = createHandlers({ hub: { drivers: () => [] }, policy: { limits: () => ({}) }, leases: {} })
+  const run = value => handlers['page.title']({
+    tabId: 't1',
+    driver: {
+      page: () => ({
+        evaluate: async (tabId, options) => {
+          calls.push([tabId, options])
+          return { value }
+        }
+      })
+    }
+  })
+  const result = await run({ title: 'T'.repeat(10001), url: 'https://example.test/path', extra: 'dropped' })
+  assert.equal(result.title.length, 10000)
+  assert.equal(result.url, 'https://example.test/path')
+  assert.equal(result.untrusted, true)
+  assert.deepEqual(Object.keys(result).sort(), ['title', 'untrusted', 'url'])
+  assert.deepEqual(calls, [['t1', { expression: '({title:document.title,url:location.href})' }]])
+  for (const bad of [null, {}, { title: 'ok' }, { title: 1, url: 'https://example.test/' }, { title: 'ok', url: null }]) {
+    await assert.rejects(run(bad), { code: 'INTERNAL' })
+  }
+})
+
+test('aegis handlers allow only admin or operator and rewrite scanner error codes', () => {
+  const calls = []
+  const aegis = (action, params) => {
+    calls.push(action)
+    if (params && params.fail === 'scanner') throw Object.assign(new Error('module path rejected'), { code: 'E_MODULE_PATH' })
+    if (params && params.fail === 'busy') throw Object.assign(new Error('scan running'), { code: 'BUSY' })
+    return { ok: action }
+  }
+  const handlers = createHandlers({ hub: { drivers: () => [] }, policy: { limits: () => ({}) }, leases: {}, aegis })
+  const run = (role, action, params = {}) => handlers['aegis.' + action]({ params, actor: { role } })
+  assert.throws(() => run('agent', 'settings'), { code: 'FORBIDDEN' })
+  assert.throws(() => run(undefined, 'latest'), { code: 'FORBIDDEN' })
+  assert.equal(calls.length, 0)
+  assert.deepEqual(run('admin', 'settings'), { ok: 'settings' })
+  assert.deepEqual(run('operator', 'cancel'), { ok: 'cancel' })
+  assert.throws(() => run('admin', 'start', { fail: 'scanner' }), (error) => error.code === 'INVALID_REQUEST' && error.message === 'module path rejected')
+  assert.throws(() => run('operator', 'get', { fail: 'busy' }), { code: 'BUSY' })
+  const missing = createHandlers({ hub: { drivers: () => [] }, policy: { limits: () => ({}) }, leases: {} })
+  assert.throws(() => missing['aegis.start']({ params: {}, actor: { role: 'agent' } }), { code: 'FORBIDDEN' })
+  assert.throws(() => missing['aegis.settings']({ params: {}, actor: { role: 'admin' } }), { code: 'CAPABILITY_MISSING' })
+})
+
 test('passwords import/export are CAPABILITY_MISSING with a reason and never return content', async () => {
   let inspected
   const { run } = mk({ staging: stagingFake, vault: { inspectStaged: (p) => { inspected = p; return { bytes: 1 } } } })

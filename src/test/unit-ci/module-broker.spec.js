@@ -101,6 +101,24 @@ test('Hub modules: calls only the Broker facade and never exposes a connection s
   assert.equal((await controller.handle('modules.result', null)).ok, false)
 })
 
+test('Hub modules stay disabled when no Broker is configured', async () => {
+  const controller = createBrowserHubController({ api: {}, tokens: {} })
+  try {
+    assert.deepEqual((await controller.handle('modules.status')).result, {
+      configured: false,
+      ready: false,
+      executionEnabled: false
+    })
+    for (const action of ['modules.list', 'modules.jobs', 'modules.createJob', 'modules.getJob', 'modules.result', 'modules.cancel']) {
+      const result = await controller.handle(action, { jobId: 'a'.repeat(32) })
+      assert.equal(result.ok, false, action)
+      assert.equal(result.error.code, 'DISABLED', action)
+    }
+  } finally {
+    controller.dispose()
+  }
+})
+
 test('module bridge: actual separate Broker HTTP auth, execution gate, result and shutdown', {
   skip: !fs.existsSync(path.join(brokerRoot, 'src', 'cli.js')),
   timeout: 30000
