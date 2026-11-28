@@ -32,6 +32,42 @@ test('client inventory schema bounds software and role and excludes paths, accou
     { ...record(), security: { status: 'ok', products: ['unsafe\nname'] } },
     { ...record(), software: { ...record().software, items: Array.from({ length: 101 }, () => ({ name: 'A', version: '' })) } }
   ]) assert.throws(() => normalizeClientInventory(invalid))
+  const addressed = record()
+  addressed.ipv4 = [
+    '10.1.2.3',
+    '10.1.2.3',
+    '127.0.0.1',
+    '127.1.1.1',
+    '169.254.4.5',
+    '169.1.1.1',
+    '10.0.0.256',
+    'not-an-ip',
+    '2001:db8::1',
+    '8.8.8.8',
+    '1.1.1.1',
+    '9.9.9.9',
+    '4.4.4.4',
+    '1.0.0.1',
+    '8.8.4.4',
+    '9.9.9.10'
+  ]
+  addressed.security.products = [{ name: 'Defender', enabled: false }]
+  assert.deepEqual(normalizeClientInventory(addressed).ipv4, [
+    '10.1.2.3', '169.1.1.1', '8.8.8.8', '1.1.1.1', '9.9.9.9', '4.4.4.4', '1.0.0.1', '8.8.4.4'
+  ])
+  assert.deepEqual(normalizeClientInventory(addressed).security.products, [{ name: 'Defender', enabled: false }])
+  const longName = 'A'.repeat(160)
+  const bounded = record()
+  bounded.software.items[0].name = longName
+  assert.equal(normalizeClientInventory(bounded).software.items[0].name, longName)
+  for (const name of ['A'.repeat(161), 'A\u007fB', 'A\tB', ' Anubis']) {
+    const invalidName = record()
+    invalidName.software.items[0].name = name
+    assert.throws(() => normalizeClientInventory(invalidName))
+  }
+  const badEnabled = record()
+  badEnabled.security.products = [{ name: 'Defender', enabled: 'yes' }]
+  assert.throws(() => normalizeClientInventory(badEnabled))
   assert(!script().includes('Win32_Product'), 'Software inventory must not trigger MSI reconfiguration')
   assert(!script().includes('UninstallString'))
   assert(script().includes('WindowsBuiltInRole'))

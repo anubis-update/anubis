@@ -77,3 +77,142 @@ test('runtime uses the directory, then the backup domain, then the other gateway
     await runtime.stop()
   }
 })
+
+const DEVICE = '11111111-1111-4111-8111-111111111111'
+
+function runtimeFor (dir, { failuresBeforeSwitch = 3, fetchImpl, createAgent, onStatus = () => {} } = {}) {
+  return createFleetRuntime({
+    userData: dir,
+    port: 9,
+    header: 'ab'.repeat(32),
+    version: '5.7.58',
+    failuresBeforeSwitch,
+    identityImpl: () => ({ id: DEVICE }),
+    fetchImpl: fetchImpl || (async () => ({ ok: true, json: async () => document })),
+    onStatus,
+    createAgent: createAgent || (() => ({ start () {}, stop () {} }))
+  })
+}
+
+const settled = () => new Promise(resolve => setTimeout(resolve, 0))
+
+async function until (predicate) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (predicate()) return
+    await settled()
+  }
+  assert.fail('condition was not met')
+}
+
+test('only repeated transport failures change gateway; auth and policy errors stay put', () => {
+  for (const error of [
+    'Enrollment rejected: HTTP 408',
+    'Enrollment rejected: HTTP 429',
+    'Enrollment rejected: HTTP 503',
+    'fetch failed',
+    'connect ECONNRESET',
+    'getaddrinfo ENOTFOUND',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+    'certificate has expired',
+    'tunnel disconnected',
+    'tunnel failed',
+    'channel connection failed'
+  ]) {
+    assert.equal(fleet.isTransportFailure({ status: 'offline', error }), true, error)
+  }
+  for (const error of [
+    'Enrollment rejected: HTTP 401',
+    'Enrollment rejected: HTTP 403',
+    'Enrollment rejected: HTTP 400',
+    'policy denied'
+  ]) {
+    assert.equal(fleet.isTransportFailure({ status: 'offline', error }), false, error)
+  }
+  assert.equal(fleet.isTransportFailure({ status: 'online', error: 'fetch failed' }), false)
+  assert.equal(fleet.isTransportFailure({ status: 'offline' }), false)
+  assert.equal(fleet.isTransportFailure(null), false)
+})
+
+test('the assigned gateway is held until three transport failures, and an online probe clears the count', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'anubis-fleet-hold-'))
+  const agents = []
+  const runtime = runtimeFor(dir, {
+    createAgent ({ baseUrl, onStatus }) {
+      const agent = { baseUrl, onStatus, stopped: false, start () { agents.push(agent) }, stop () { agent.stopped = true } }
+      return agent
+    }
+  })
+  runtime.start()
+  try {
+    await until(() => agents.length === 1)
+    const first = agents[0]
+    first.onStatus({ status: 'offline', error: 'Enrollment rejected: HTTP 401' })
+    first.onStatus({ status: 'offline', error: 'fetch failed' })
+    first.onStatus({ status: 'offline', error: 'connect ECONNRESET' })
+    await settled()
+    assert.equal(agents.length, 1)
+    first.onStatus({ status: 'online' })
+    first.onStatus({ status: 'offline', error: 'ETIMEDOUT' })
+    first.onStatus({ status: 'offline', error: 'certificate has expired' })
+    await settled()
+    assert.equal(agents.length, 1)
+    first.onStatus({ status: 'offline', error: 'tunnel disconnected' })
+    await until(() => agents.length === 2)
+    const assigned = fleet.readState(fleet.statePath(dir))
+    const gateway = assigned.fleet.gateways.find(item => item.id === assigned.gatewayId)
+    assert.equal(first.stopped, true)
+    assert.equal(new URL(first.baseUrl).hostname, gateway.primary)
+    assert.equal(new URL(agents[1].baseUrl).hostname, gateway.backup)
+  } finally {
+    await runtime.stop()
+  }
+})
+
+test('exhausting primary and backup persists the other gateway', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'anubis-fleet-move-'))
+  const agents = []
+  const runtime = runtimeFor(dir, {
+    failuresBeforeSwitch: 1,
+    createAgent ({ baseUrl, onStatus }) {
+      const agent = { baseUrl, onStatus, start () { agents.push(agent) }, stop () {} }
+      return agent
+    }
+  })
+  runtime.start()
+  try {
+    await until(() => agents.length === 1)
+    const initial = fleet.readState(fleet.statePath(dir))
+    const initialGateway = initial.fleet.gateways.find(item => item.id === initial.gatewayId)
+    agents[0].onStatus({ status: 'offline', error: 'fetch failed' })
+    await until(() => agents.length === 2)
+    assert.equal(new URL(agents[1].baseUrl).hostname, initialGateway.backup)
+    agents[1].onStatus({ status: 'offline', error: 'ENOTFOUND' })
+    await until(() => agents.length === 3)
+    const moved = fleet.readState(fleet.statePath(dir))
+    assert.notEqual(moved.gatewayId, initial.gatewayId)
+    const next = moved.fleet.gateways.find(item => item.id === moved.gatewayId)
+    assert.equal(new URL(agents[2].baseUrl).hostname, next.primary)
+  } finally {
+    await runtime.stop()
+  }
+})
+
+test('startup stays offline when the directory cannot be fetched and nothing is saved', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'anubis-fleet-offline-'))
+  let seen
+  const runtime = runtimeFor(dir, {
+    fetchImpl: async () => { throw new Error('down') },
+    onStatus (status) { seen = status },
+    createAgent () { throw new Error('must not connect without an assignment') }
+  })
+  runtime.start()
+  try {
+    await until(() => seen)
+    assert.equal(seen.status, 'offline')
+    assert.equal(seen.error, 'Fleet directory unavailable')
+    await assert.rejects(runtime.activate('key'), /Fleet gateway is not connected/)
+  } finally {
+    await runtime.stop()
+  }
+})
